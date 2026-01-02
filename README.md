@@ -4,6 +4,19 @@ This repository contains the codebase for a Single-Stream Diffusion Transformer 
 
 The primary objective was to demonstrate the feasibility and training stability of coupling the high-fidelity **EQ-SDXL-VAE** with the powerful **T5Gemma2** text encoder for image generation on consumer-grade hardware (NVIDIA RTX 5060 Ti 16GB).
 
+**Note on Final Checkpoint:** The final, best-performing **EMA checkpoint (Epoch 1200)** is uploaded to [Hugging Face and is linked separately from this repository](https://huggingface.co/Crowlley/SingleStreamDiT_T5Gemma2-EQ-VAE/tree/main).
+
+## Project Overview
+
+### How it started.
+![How it started](https://github.com/Particle1904/SingleStreamDiT_T5Gemma2-EQ-VAE/blob/main/readme_assets/bored.png?raw=true)
+
+### Verification and Result Comparison
+
+| Cached Latent Verification | Final Generated Sample (RK4, Epoch 1200 EMA) |
+| :---: | :---: |
+| ![Cache Verification](https://github.com/Particle1904/SingleStreamDiT_T5Gemma2-EQ-VAE/blob/main/readme_assets/cache_verification.png?raw=true) | ![Generated Sample](https://github.com/Particle1904/SingleStreamDiT_T5Gemma2-EQ-VAE/blob/main/readme_assets/sample_rk4_cfg1.5.png?raw=true) |
+
 ## Core Models and Architecture
 
 | Component | Model ID / Function | Purpose |
@@ -12,6 +25,12 @@ The primary objective was to demonstrate the feasibility and training stability 
 | **Text Encoder** | `google/t5gemma-2-1b-1b` | Used to generate rich, high-dimensional text embeddings (1152 dimensions) for conditional guidance (CFG). |
 | **VAE** | `KBlueLeaf/EQ-SDXL-VAE` | A high-quality SDXL-compatible VAE used for latent compression and reconstruction. Crucial for handling fine details. |
 | **Training Method** | Flow Matching (V-Prediction) | The model is trained to predict the vector field that transforms noise ($x_0$) to the clean latent ($x_1$). |
+
+## Training Progression
+
+| Early Epoch (Epoch 10) | Final Epoch (Epoch 1200, RAW) | Full Progression (GIF) |
+| :---: | :---: | :---: |
+| ![Epoch10](https://github.com/Particle1904/SingleStreamDiT_T5Gemma2-EQ-VAE/blob/main/readme_assets/epoch_10.png?raw=true) | ![Epoch1200](https://github.com/Particle1904/SingleStreamDiT_T5Gemma2-EQ-VAE/blob/main/readme_assets/epoch_1200.png?raw=true) | ![Epochs over time](https://github.com/Particle1904/SingleStreamDiT_T5Gemma2-EQ-VAE/blob/main/readme_assets/epochsOverTime.gif?raw=true) |
 
 ## Data Curation and Preprocessing
 
@@ -32,9 +51,20 @@ Training utilized a **Cosine Annealing Learning Rate Scheduler** across all epoc
 | **601 - 900** | L1 Loss (MAE) | $5e-5 \to \sim 2e-5$ | Horizontal Flip **Disabled**. Switched to L1 Loss. | Modest improvement in sharpness and clarity. |
 | **901 - 1200** | L1 Loss (MAE) | $5e-5 \to 1e-5$ | Horizontal Flip **Disabled**. **Introduced EMA** + Latent Normalization to $\text{Std} \approx 1.0$. | **Optimal result.** Eliminated "waxy" look, successfully recovering and sharpening the high-frequency textural details. |
 
+### Loss Progression
+
+![Loss Graph](https://github.com/Particle1904/SingleStreamDiT_T5Gemma2-EQ-VAE/blob/main/readme_assets/loss_curve.png?raw=true)
+
 **Training Time Estimate:**
 *   **GPU Time:** Approximately **5 hours** of total GPU compute time for 1200 epochs (based on an average epoch time of $\sim 14$ seconds).
 *   **Project Time (Human):** The overall development and hyperparameter tuning project took approximately 2-3 days.
+
+## Reproducibility
+
+This repository is designed to be fully reproducible. The following data is included in the respective directories:
+*   **Raw Dataset:** The original `.png` images and the **Qwen3-VL-4B-Instruct** generated `.txt` captions.
+*   **Cached Dataset:** The processed, tokenized, and VAE-encoded latents (`.pt` files).
+*   **Training Artifacts:** All checkpoint samples (from Epoch 10 to 1200) and all training log files (split by epoch range and a combined 0-1200 file).
 
 ### Key Configuration in `train_v3_ema.py`
 
@@ -53,7 +83,7 @@ This section details the purpose and configurable parameters of each primary Pyt
 | File | Purpose | Key Configs | Notes |
 | :--- | :--- | :--- | :--- |
 | **`train_v3_ema.py`** | **Final, Optimal Training Script.** Uses L1 Loss, Latent Normalization, Cosine LR Annealing, and **EMA**. | `RESUME_FROM`, `START_EPOCH`, `BATCH_SIZE`, `LEARNING_RATE`, `EMA_DECAY` | This is the recommended script for any new training runs. |
-| **`train_v2_l1.py`** | Archive: Training script for epochs 601-900 (L1 Loss only). | `RESUME_FROM`, `START_EPOCH` | **DEPRECATED.**  |
+| **`train_v2_l1.py`** | Archive: Training script for epochs 601-900 (L1 Loss only). | `RESUME_FROM`, `START_EPOCH` | **DEPRECATED.** |
 | **`train.py`** | Archive: Initial training script for epochs 0-600 (MSE Loss, basic, **with flip augmentation**). | `RESUME_FROM`, `START_EPOCH` | **DEPRECATED.** |
 | **`train_overfit.py`** | A sanity check utility to ensure the model can overfit to a single data point. | `TARGET_FILE`, `STEPS` | For debugging architecture changes only. |
 
