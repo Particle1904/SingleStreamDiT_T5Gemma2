@@ -8,7 +8,7 @@ The primary objective was to demonstrate the feasibility and training stability 
 
 ## Project Overview
 
-### How it started.
+### How it started
 ![How it started](https://github.com/Particle1904/SingleStreamDiT_T5Gemma2-EQ-VAE/blob/main/readme_assets/bored.png?raw=true)
 
 ### Verification and Result Comparison
@@ -38,6 +38,7 @@ The model was trained on a small, curated dataset of **200 images** (10 categori
 
 | Component | Tool / Method | Purpose / Detail |
 | :--- | :--- | :--- |
+| **Pre/Post-processing of Dataset** | **[Dataset Tools](https://github.com/Particle1904/DatasetHelpers)** | Used to resize images to 512x512 and to Edit the Qwen3-VL captions. |
 | **Captioning** | **Qwen3-VL-4B-Instruct** | The dataset was captioned using a specialized visual language model with a strict botanical system instruction. This ensured captions contained precise details on **texture (waxy, serrated), plant anatomy (stamen, pistil), lighting (shallow depth of field), and shot type (macro shot)**. |
 | **Data Encoding** | `preprocess.py` | Encodes images to latents via EQ-VAE and text via T5Gemma2, applying bucketing and horizontal flip augmentation (for Epochs 0-600). |
 
