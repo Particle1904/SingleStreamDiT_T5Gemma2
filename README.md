@@ -4,18 +4,18 @@ This repository contains the codebase for a Single-Stream Diffusion Transformer 
 
 The primary objective was to demonstrate the feasibility and training stability of coupling the high-fidelity **EQ-SDXL-VAE** with the powerful **T5Gemma2** text encoder for image generation on consumer-grade hardware (NVIDIA RTX 5060 Ti 16GB).
 
-**Note on Final Checkpoint:** The final, best-performing **EMA checkpoint (Epoch 1200)** is uploaded to [Hugging Face and is linked separately from this repository](https://huggingface.co/Crowlley/SingleStreamDiT_T5Gemma2-EQ-VAE/tree/main).
+**Note on Final Checkpoint:** The final, best-performing **EMA checkpoint (Epoch 1200)** is uploaded to [Hugging Face and is linked separately from this repository](https://huggingface.co/Crowlley/SingleStreamDiT_T5Gemma2/tree/main).
 
 ## Project Overview
 
 ### How it started
-![How it started](https://github.com/Particle1904/SingleStreamDiT_T5Gemma2-EQ-VAE/blob/main/readme_assets/bored.png?raw=true)
+![How it started](https://github.com/Particle1904/SingleStreamDiT_T5Gemma2/blob/main/readme_assets/bored.png?raw=true)
 
 ### Verification and Result Comparison
 
 | Cached Latent Verification | Final Generated Sample (RK4, Epoch 1200 EMA) |
 | :---: | :---: |
-| ![Cache Verification](https://github.com/Particle1904/SingleStreamDiT_T5Gemma2-EQ-VAE/blob/main/readme_assets/cache_verification.png?raw=true) | ![Generated Sample](https://github.com/Particle1904/SingleStreamDiT_T5Gemma2-EQ-VAE/blob/main/readme_assets/sample_rk4_cfg1.5.png?raw=true) |
+| ![Cache Verification](https://github.com/Particle1904/SingleStreamDiT_T5Gemma2/blob/main/readme_assets/cache_verification.png?raw=true) | ![Generated Sample](https://github.com/Particle1904/SingleStreamDiT_T5Gemma2/blob/main/readme_assets/sample_rk4_cfg1.5.png?raw=true) |
 
 ## Core Models and Architecture
 
@@ -30,7 +30,7 @@ The primary objective was to demonstrate the feasibility and training stability 
 
 | Early Epoch (Epoch 10) | Final Epoch (Epoch 1200, RAW) | Full Progression (GIF) |
 | :---: | :---: | :---: |
-| ![Epoch10](https://github.com/Particle1904/SingleStreamDiT_T5Gemma2-EQ-VAE/blob/main/readme_assets/epoch_10.png?raw=true) | ![Epoch1200](https://github.com/Particle1904/SingleStreamDiT_T5Gemma2-EQ-VAE/blob/main/readme_assets/epoch_1200.png?raw=true) | ![Epochs over time](https://github.com/Particle1904/SingleStreamDiT_T5Gemma2-EQ-VAE/blob/main/readme_assets/epochsOverTime.gif?raw=true) |
+| ![Epoch10](https://github.com/Particle1904/SingleStreamDiT_T5Gemma2/blob/main/readme_assets/epoch_10.png?raw=true) | ![Epoch1200](https://github.com/Particle1904/SingleStreamDiT_T5Gemma2/blob/main/readme_assets/epoch_1200.png?raw=true) | ![Epochs over time](https://github.com/Particle1904/SingleStreamDiT_T5Gemma2/blob/main/readme_assets/epochsOverTime.gif?raw=true) |
 
 ## Data Curation and Preprocessing
 
@@ -88,7 +88,7 @@ Training utilized a **Cosine Annealing Learning Rate Scheduler** across all epoc
 
 ### Loss Progression
 
-![Loss Graph](https://github.com/Particle1904/SingleStreamDiT_T5Gemma2-EQ-VAE/blob/main/readme_assets/loss_curve.png?raw=true)
+![Loss Graph](https://github.com/Particle1904/SingleStreamDiT_T5Gemma2/blob/main/readme_assets/loss_curve.png?raw=true)
 
 **Training Time Estimate:**
 *   **GPU Time:** Approximately **5 hours** of total GPU compute time for 1200 epochs (based on an average epoch time of $\sim 14$ seconds).
