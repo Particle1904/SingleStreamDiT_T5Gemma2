@@ -35,7 +35,7 @@ The primary objective was to demonstrate the feasibility and training stability 
 
 ## Training Progression
 
-| Early Epoch (Epoch 10) | Final Epoch (Epoch 1200, RAW) | Full Progression (GIF) |
+| Early Epoch (Epoch 20) | Final Epoch (Epoch 1700, RAW) | Full Progression |
 | :---: | :---: | :---: |
 | ![Epoch25](https://github.com/Particle1904/SingleStreamDiT_T5Gemma2/blob/main/readme_assets/epoch_25.png?raw=true) | ![Epoch1700](https://github.com/Particle1904/SingleStreamDiT_T5Gemma2/blob/main/readme_assets/epoch_1700.png?raw=true) | ![Epochs over time](https://github.com/Particle1904/SingleStreamDiT_T5Gemma2/blob/main/readme_assets/training_progression.webp?raw=true) |
 
