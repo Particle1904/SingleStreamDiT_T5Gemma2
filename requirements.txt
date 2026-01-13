@@ -1,0 +1,10 @@
+torch>=2.5.0
+torchvision
+diffusers>=0.30.0
+transformers>=4.44.0
+accelerate
+bitsandbytes
+pandas
+matplotlib
+tqdm
+sentencepiece

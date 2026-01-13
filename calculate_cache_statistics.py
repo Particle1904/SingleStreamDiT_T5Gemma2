@@ -1,35 +1,56 @@
 import torch
 import os
 from tqdm import tqdm
+from config import Config
 
-CACHE_DIR = "./cached_data"
+CACHE_DIR = Config.cache_dir
 
-def check_stats():
+def calculate_stats():
     files = [os.path.join(CACHE_DIR, f) for f in os.listdir(CACHE_DIR) if f.endswith('.pt')]
+    if not files:
+        print("No files found!")
+        return
+
+    print("Calculating Latent Statistics (Welford's Algorithm)...")
     
+    n_samples = 0
+    mean_accumulator = 0.0
+    M2_accumulator = 0.0
+    
+    for f in tqdm(files):
+        data = torch.load(f, map_location="cpu")
+        l = data["latents"].float() 
+        
+        pixels = l.numel()
+        batch_mean = l.mean().item()
+        
+        delta = batch_mean - mean_accumulator
+        n_samples += 1
+        mean_accumulator += delta / n_samples
+        M2_accumulator += delta * (batch_mean - mean_accumulator)
+
     all_means = []
     all_stds = []
     
-    print("Calculating Latent Statistics...")
     for f in tqdm(files):
-        d = torch.load(f)
-        l = d["latents"].float()
-        all_means.append(l.mean())
-        all_stds.append(l.std())
+        data = torch.load(f, map_location="cpu")
+        l = data["latents"].float()
+        all_means.append(l.mean().item())
+        all_stds.append(l.std().item())
         
-    total_mean = torch.tensor(all_means).mean().item()
-    total_std = torch.tensor(all_stds).mean().item()
+    total_mean = sum(all_means) / len(all_means)
+    total_std = sum(all_stds) / len(all_stds)
+
+    print(f"\n" + "="*40)
+    print(f"      RESULTS TO COPY TO CONFIG.PY      ")
+    print(f"="*40)
+    print(f"Current vae_scaling_factor used: {Config.vae_scaling_factor}")
+    print(f"dataset_mean = {total_mean:.6f}")
+    print(f"dataset_std  = {total_std:.6f}")
+    print(f"="*40)
     
-    print(f"\n--- RESULTS ---")
-    print(f"Current Mean (Should be near 0): {total_mean:.4f}")
-    print(f"Current Std  (Should be near 1): {total_std:.4f}")
-    
-    if total_std < 0.8 or total_std > 1.2:
-        print("\n[!] WARNING: YOUR SCALING FACTOR IS WRONG.")
-        correct_scale = 0.13025 / total_std
-        print(f"You should change 0.13025 to approx: {correct_scale * 0.13025:.5f}")
-    else:
-        print("\n[OK] Scaling factor is correct.")
+    if total_std < 0.5:
+        print("\n[!] WARNING: Your std is very low. You MUST update config.py with these values.")
 
 if __name__ == "__main__":
-    check_stats()
+    calculate_stats()

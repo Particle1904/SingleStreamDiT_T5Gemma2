@@ -2,6 +2,7 @@ import pandas as pd
 import matplotlib.pyplot as plt
 import os
 import sys
+from config import Config
 
 def plot_loss(csv_path):
     if not os.path.exists(csv_path):
@@ -28,5 +29,5 @@ def plot_loss(csv_path):
     print(f"\nSuccessfully generated loss curve: {output_path}")
 
 if __name__ == "__main__":
-    LOG_FILE = "./logs/combined_logs_0-to-1200_epochs.csv" 
+    LOG_FILE = Config.log_file
     plot_loss(LOG_FILE)

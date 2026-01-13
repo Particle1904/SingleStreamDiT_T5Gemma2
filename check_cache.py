@@ -2,9 +2,10 @@ import torch
 from diffusers import AutoencoderKL
 from PIL import Image
 import numpy as np
+from config import Config
 
-TARGET_FILE = "./cached_data/39.pt"
-VAE_ID = "KBlueLeaf/EQ-SDXL-VAE"
+TARGET_FILE = Config.target_file
+VAE_ID = Config.vae_id
 
 def check():
     print(f"Checking {TARGET_FILE}...")
@@ -12,14 +13,14 @@ def check():
     data = torch.load(TARGET_FILE)
     latents = data["latents"].unsqueeze(0).to("cuda")
 
-    print("Loading VAE...")
+    print(f"Loading VAE: {VAE_ID}...")
     vae = AutoencoderKL.from_pretrained(VAE_ID).to("cuda")
     
     print("Decoding...")
-    latents = latents / 0.13025
+    latents = latents / Config.vae_scaling_factor
     
     with torch.no_grad():
-        image = vae.decode(latents).sample
+        image = vae.decode(latents.float()).sample
         
     image = (image / 2 + 0.5).clamp(0, 1)
     image = image.cpu().permute(0, 2, 3, 1).float().numpy()
