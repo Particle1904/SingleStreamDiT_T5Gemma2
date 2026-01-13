@@ -54,38 +54,68 @@ class SwiGLU(nn.Module):
         return self.w3(F.silu(self.w1(x)) * self.w2(x))
 
 class FourierFilter(nn.Module):
-    def __init__(self, dim, expansion_factor=1.5):
+    def __init__(self, dim, hidden_dim=64):
         super().__init__()
-        hidden_dim = int(dim * expansion_factor)
-        
-        self.freq_mlp = nn.Sequential(
-            nn.Linear(dim * 2, hidden_dim),
+        self.low_mlp = nn.Sequential(
+            nn.Linear(1, hidden_dim),
             nn.SiLU(),
-            nn.Linear(hidden_dim, dim * 2)
+            nn.Linear(hidden_dim, dim)
         )
-        
-        self.gate = nn.Parameter(torch.zeros(1)) 
+
+        self.high_mlp = nn.Sequential(
+            nn.Linear(1, hidden_dim),
+            nn.SiLU(),
+            nn.Linear(hidden_dim, dim)
+        )
+
+        self.raw_cutoff = nn.Parameter(torch.tensor(-1.0))
+        self.raw_scale = nn.Parameter(torch.tensor(3.0))
+        self.gate = nn.Parameter(torch.zeros(1))
+
+        for mlp in (self.low_mlp, self.high_mlp):
+            nn.init.zeros_(mlp[-1].weight)
+            nn.init.constant_(mlp[-1].bias, 0.0)
+    
+    @staticmethod
+    @lru_cache(maxsize=32)
+    def get_normalized_radius(h, w, device):
+        fy = torch.fft.fftfreq(h, device=device)
+        fx = torch.fft.rfftfreq(w, device=device)
+        gy, gx = torch.meshgrid(fy, fx, indexing='ij')
+        r = torch.sqrt(gx**2 + gy**2) / 0.70710678
+        return r
 
     def forward(self, x, h, w):
         B, L, C = x.shape
         dtype = x.dtype
-        
-        x_img = x.view(B, h, w, C)        
-        x_img_fp32 = x_img.float()        
-        x_fft = torch.fft.rfft2(x_img_fp32, dim=(1, 2), norm='ortho')   
-             
-        freq_real = torch.view_as_real(x_fft)         
-        freq_flat = freq_real.flatten(start_dim=-2)  
-               
-        freq_processed = self.freq_mlp(freq_flat.float())      
-        freq_processed = freq_processed.view(freq_real.shape)        
-        freq_processed = torch.view_as_complex(freq_processed.float())   
-             
-        x_out = torch.fft.irfft2(freq_processed, s=(h, w), dim=(1, 2), norm='ortho')        
-        x_out = x_out.reshape(B, L, C).to(dtype)
-        
-        return x_out * torch.tanh(self.gate)
 
+        x_img = x.view(B, h, w, C).float()
+        x_fft = torch.fft.rfft2(x_img, dim=(1, 2), norm='ortho')
+        
+        h_freq, w_freq = x_fft.shape[1], x_fft.shape[2]
+        
+        r = self.get_normalized_radius(h, w, x.device)
+        r_flat = r.reshape(-1, 1)
+
+        log_gain_low = self.low_mlp(r_flat)
+        log_gain_high = self.high_mlp(r_flat)
+        
+        gain_low = torch.exp(torch.clamp(log_gain_low, -5, 5))
+        gain_high = torch.exp(torch.clamp(log_gain_high, -5, 5))
+
+        cutoff = torch.sigmoid(self.raw_cutoff)
+        scale = F.softplus(self.raw_scale)
+        
+        mask = torch.sigmoid((cutoff - r_flat) * scale)
+        
+        final_gain_flat = mask * gain_low + (1.0 - mask) * gain_high
+        final_gain = final_gain_flat.view(h_freq, w_freq, C)
+
+        x_fft_filtered = x_fft * final_gain.unsqueeze(0)
+        
+        x_out = torch.fft.irfft2(x_fft_filtered, s=(h, w), dim=(1, 2), norm='ortho')
+        return x_out.reshape(B, L, C).to(dtype) * torch.tanh(self.gate)
+    
 @lru_cache(maxsize=32)
 def create_2d_rope_grid(h, w, dim, device):
     grid_h = torch.arange(h, device=device)
@@ -188,11 +218,10 @@ class VisualFusionBlock(nn.Module):
         
         if img_h is not None and img_w is not None:
             img_tokens = x_modulated_ffn[:, img_start_idx:, :]
-            
             fourier_input = self.fourier_norm(img_tokens)
             fourier_out = self.fourier_filter(fourier_input, img_h, img_w)
-            
-            ffn_out[:, img_start_idx:, :] = ffn_out[:, img_start_idx:, :] + fourier_out
+
+            ffn_out[:, img_start_idx:, :] += fourier_out
 
         x = x + gate_mlp.unsqueeze(1) * self.dropout(ffn_out)
         
@@ -393,7 +422,4 @@ class SingleStreamDiTV2(nn.Module):
         
         for module in self.modules():
             if isinstance(module, FourierFilter):
-                nn.init.xavier_uniform_(module.freq_mlp[0].weight)
-                nn.init.constant_(module.freq_mlp[2].weight, 0)
-                nn.init.constant_(module.freq_mlp[2].bias, 0)
                 nn.init.constant_(module.gate, 0.1)

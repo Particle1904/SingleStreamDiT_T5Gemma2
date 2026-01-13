@@ -101,19 +101,23 @@ def cleanup_checkpoints(directory, prefix, keep_last_n=1):
         except OSError as e:
             print(f"Error deleting {f}: {e}")
 
-def get_average_gate_value(model):
+def get_gate_stats(model):
     if hasattr(model, "module"):
         model = model.module
     
     gate_values = []
     for name, module in model.named_modules():
         if hasattr(module, "gate") and isinstance(module.gate, torch.nn.Parameter):
-            gate_values.append(module.gate.item())
+            gate_values.append(torch.tanh(module.gate).item())
             
     if len(gate_values) == 0:
-        return 0.0
+        return 0.0, 0.0, 0.0
     
-    return sum(gate_values) / len(gate_values)
+    avg_val = sum(gate_values) / len(gate_values)
+    min_val = min(gate_values)
+    max_val = max(gate_values)
+    
+    return avg_val, min_val, max_val
 
 class CSVLogger:
     def __init__(self, filepath, resume=False):
@@ -122,11 +126,12 @@ class CSVLogger:
         if not os.path.exists(filepath) or not resume:
             with open(filepath, "w", newline="") as f:
                 writer = csv.writer(f)
-                writer.writerow(["Epoch", "Global_Step", "Loss", "LR", "Fourier_Gate_Avg"])
-    def log(self, epoch, step, loss, lr, gate_val):
+                writer.writerow(["Epoch", "Global_Step", "Loss", "LR", "Gate_Avg", "Gate_Min", "Gate_Max"])
+
+    def log(self, epoch, step, loss, lr, gate_avg, gate_min, gate_max):
         with open(self.filepath, "a", newline="") as f:
             writer = csv.writer(f)
-            writer.writerow([epoch, step, loss, lr, gate_val])
+            writer.writerow([epoch, step, loss, lr, gate_avg, gate_min, gate_max])
 
 def print_model_size(model):
     total_params = sum(p.numel() for p in model.parameters())
@@ -347,9 +352,9 @@ def train():
             self_e_status = "ON" if is_self_e else "OFF"
             if step % 10 == 0:
                 lr_current = optimizer.param_groups[0]['lr']
-                avg_gate = get_average_gate_value(model)                
-                pbar.set_description(f"Ep {epoch} | Loss: {current_loss:.4f} | Gate: {avg_gate:.4f} | LR: {lr_current:.6f} | Self-Eval: {self_e_status}")
-                logger.log(epoch, global_step, current_loss, lr_current, avg_gate)
+                avg_gate, min_gate, max_gate = get_gate_stats(model)           
+                pbar.set_description(f"Ep {epoch} | Loss: {current_loss:.4f} | FGate (Avg-Min-Max): {avg_gate:.4f} [{min_gate:.3f}/{max_gate:.3f}] | LR: {lr_current:.6f}")
+                logger.log(epoch, global_step, current_loss, lr_current, avg_gate, min_gate, max_gate)
 
         if epoch > 0 and epoch % VALIDATE_EVERY == 0:
             validate(ema_model.module, vae, epoch, is_ema=True)
