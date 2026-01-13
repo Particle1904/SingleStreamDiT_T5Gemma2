@@ -4,7 +4,7 @@ This repository contains the codebase for a Single-Stream Diffusion Transformer 
 
 The primary objective was to demonstrate the feasibility and training stability of coupling the high-fidelity **FLUX.1-VAE** with the powerful **T5Gemma2** text encoder for image generation on consumer-grade hardware (NVIDIA RTX 5060 Ti 16GB).
 
-**Note on Final Checkpoint:** The final, best-performing **EMA checkpoint** is uploaded to [Hugging Face and is linked separately from this repository](https://huggingface.co/Crowlley/SingleStreamDiT_T5Gemma2/tree/main).
+**Note on Final Checkpoint:** The final, best-performing **EMA checkpoint** is uploaded to [Hugging Face and is linked separately from this repository](https://huggingface.co/Crowlley/SingleStreamDiT-T5Gemma2).
 
 ## Project Overview
 
