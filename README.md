@@ -14,15 +14,15 @@ The primary objective was to demonstrate the feasibility and training stability 
 
 ### Verification and Result Comparison
 
-| Cached Latent Verification | Final Generated Sample (RK4 100 steps) |
+| Cached Latent Verification | Final Generated Sample (Euler 50 steps and CFG 3.0) |
 | :---: | :---: |
-| ![Cache Verification](https://github.com/Particle1904/SingleStreamDiT_T5Gemma2/blob/main/readme_assets/cache_verification.png?raw=true) | ![Generated Sample](https://github.com/Particle1904/SingleStreamDiT_T5Gemma2/blob/main/readme_assets/sample_rk4_steps50_cfg1.15.png?raw=true) |
+| ![Cache Verification](https://github.com/Particle1904/SingleStreamDiT_T5Gemma2/blob/main/readme_assets/cache_verification.png?raw=true) | ![Generated Sample](https://github.com/Particle1904/SingleStreamDiT_T5Gemma2/blob/main/readme_assets/sample_euler_steps50_cfg3.png?raw=true) |
 
 ## Core Models and Architecture
 
 | Component | Model ID / Function | Purpose |
 | :--- | :--- | :--- |
-| **Generator** | `SingleStreamDiTV2` | Custom Single-Stream DiT featuring Visual Fusion blocks, Context Refiners, and Fourier Filters. DiT Parameters: _384 Hidden Size, 6 Heads, 20 Depth, 2 Refiner Depth, 128 Text Token Legth, 2 Patch Size._ |
+| **Generator** | `SingleStreamDiTV2` | Custom Single-Stream DiT featuring Visual Fusion blocks, Context Refiners, and Fourier Filters. DiT Parameters: _768 Hidden Size, 12 Heads, 16 Depth, 2 Refiner Depth, 128 Text Token Legth, 2 Patch Size._ |
 | **Text Encoder** | `google/t5gemma-2-1b-1b` | Generates rich, 1152-dimensional text embeddings for high-quality semantic guidance. |
 | **VAE** | `diffusers/FLUX.1-vae` | A 16-channel VAE with an 8x downsample factor, providing superior reconstruction for complex textures. |
 | **Training Method** | Flow Matching (V-Prediction) | Optimized with a Velocity-based objective and an optional Self-Evaluation (Self-E) consistency loss. |
@@ -35,9 +35,9 @@ The primary objective was to demonstrate the feasibility and training stability 
 
 ## Training Progression
 
-| Early Epoch (Epoch 20) | Final Epoch (Epoch 1700, RAW) | Full Progression |
+| Early Epoch (Epoch 25) | Final Epoch (Epoch 1200) | Full Progression |
 | :---: | :---: | :---: |
-| ![Epoch25](https://github.com/Particle1904/SingleStreamDiT_T5Gemma2/blob/main/readme_assets/epoch_25.png?raw=true) | ![Epoch1700](https://github.com/Particle1904/SingleStreamDiT_T5Gemma2/blob/main/readme_assets/epoch_1700.png?raw=true) | ![Epochs over time](https://github.com/Particle1904/SingleStreamDiT_T5Gemma2/blob/main/readme_assets/training_progression.webp?raw=true) |
+| ![Epoch25](https://github.com/Particle1904/SingleStreamDiT_T5Gemma2/blob/main/readme_assets/epoch_25.png?raw=true) | ![Epoch1700](https://github.com/Particle1904/SingleStreamDiT_T5Gemma2/blob/main/readme_assets/epoch_1200.png?raw=true) | ![Epochs over time](https://github.com/Particle1904/SingleStreamDiT_T5Gemma2/blob/main/readme_assets/training_progression.webp?raw=true) |
 
 ## Data Curation and Preprocessing
 
@@ -85,12 +85,12 @@ Output Format: Output a single string containing the caption, without double quo
 
 ## Training History and Configuration
 
-Training utilizes **8-bit AdamW** and a **Cosine Schedule with 5% Warmup**. To achieve the best balance between structural coherence and sharp textures, the model underwent a two-stage training process: 1200 epochs using **MSE** (Global Structure), followed by 500 epochs of **L1** (Texture Sharpening).
+Training utilizes **8-bit AdamW** and a **Cosine Schedule with 5% Warmup** for 1200 (stopped early) epochs using **MSE**.
 
 | Configuration | Value | Purpose |
 | :--- | :--- | :--- |
-| **Loss** | **`MSE at 1e-4`** $\to$ **`L1 1e-4`** $\to$ **`L1 5e-5 for 200 Epochs`** | Initial training with MSE for stability; switched to L1 at E1200 for detail recovery. |
-| **Batch Size** | **`12`** | Batch Size 12 was used over 16 because initially Self-Evaluation was supposed to be used. |
+| **Loss** | **`MSE at 2e-4`** | Trained with MSE only. |
+| **Batch Size** | **`16`** | Gradient Checkpointing enabled and accumulative steps set to 2. |
 | **Shift Value** | **`1.0` (Uniform)** | Ensures a balanced training across all noise levels, critical for learning geometry on small datasets. |
 | **Latent Norm** | **`0.0 Mean / 1.0 Std`** | Hardcoded identity normalization to preserve the relative channel relationships of the FLUX VAE. **Note:** Using a Mean and Std calculated from the dataset resulted in poor reconstruction with artifacts. |
 | **EMA Decay** | **`0.999`** | Maintains a moving average of weights for smoother, higher-quality inference. |
@@ -103,8 +103,8 @@ Training utilizes **8-bit AdamW** and a **Cosine Schedule with 5% Warmup**. To a
 | ![Loss Graph](https://github.com/Particle1904/SingleStreamDiT_T5Gemma2/blob/main/readme_assets/loss_curve.png?raw=true) | ![Fourier Gate](https://github.com/Particle1904/SingleStreamDiT_T5Gemma2/blob/main/readme_assets/fourier_gate.png?raw=true) |
 
 **Training Time Estimate:**
-*   **GPU Time:** Approximately **3 hours** of total GPU compute time for 1500 epochs (RTX 5060 Ti 16GB).
-*   **Project Time (Human):** 12 days of R&D, including hyperparameter tuning.
+*   **GPU Time:** Approximately **6 hours and 21 minutes** of total GPU compute time for 1200 epochs (RTX 5060 Ti 16GB).
+*   **Project Time (Human):** 13 days of R&D, including hyperparameter tuning.
 
 ## Reproducibility
 

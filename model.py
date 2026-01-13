@@ -396,4 +396,4 @@ class SingleStreamDiTV2(nn.Module):
                 nn.init.xavier_uniform_(module.freq_mlp[0].weight)
                 nn.init.constant_(module.freq_mlp[2].weight, 0)
                 nn.init.constant_(module.freq_mlp[2].bias, 0)
-                nn.init.constant_(module.gate, 1e-4)
+                nn.init.constant_(module.gate, 0.1)

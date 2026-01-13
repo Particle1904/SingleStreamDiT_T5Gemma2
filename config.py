@@ -42,9 +42,9 @@ class Config:
     in_channels = 16    
 
     # DiT backbone
-    hidden_size = 384
-    num_heads = 6
-    depth = 20
+    hidden_size = 768
+    num_heads = 12
+    depth = 16
     # Separate refinement stages
     refiner_depth = 2
     # Max token length for text conditioning
@@ -89,12 +89,12 @@ class Config:
     # ============================================================
     # Base learning rate (AdamW / 8-bit Adam)
     # 1e-4 or 2e-4 for fresh/aggressive and 4e-5 or 5e-5 for fine-tuning
-    learning_rate = 1e-4   
+    learning_rate = 2e-4   
     # Total number of epochs (from scratch or resumed)
     epochs = 1500
     # Effective batch size per optimizer step
-    batch_size = 12
-    accum_steps = 1
+    batch_size = 16
+    accum_steps = 2
     # Loss for velocity prediction
     # Options: "mse", "l1", "huber"
     loss_type = "mse"
@@ -120,9 +120,9 @@ class Config:
     # Teacher–student consistency regularization
     # ============================================================
     # Enable Self-Evaluation (recommended OFF for initial training)
-    use_self_eval = False
+    use_self_eval = True
     # Fraction of total epochs before Self-Evaluation activates
-    start_self_eval_at = 0.75
+    start_self_eval_at = 0.85
     # Strength of self-evaluation loss
     self_eval_lambda = 0.3
     
@@ -131,7 +131,7 @@ class Config:
     # Runtime and numerical behavior
     # ============================================================
     dtype = torch.bfloat16
-    gradient_checkpointing = False
+    gradient_checkpointing = True
     # Exponential Moving Average for inference stability
     use_ema = True
     ema_decay = 0.999
@@ -150,7 +150,7 @@ class Config:
     save_every = 100
     validate_every = 25
     # Validation sampling parameters
-    validate_cfg = 1.25
+    validate_cfg = 3.00
     validate_steps = 30 
     validate_sampler = "euler"
     
