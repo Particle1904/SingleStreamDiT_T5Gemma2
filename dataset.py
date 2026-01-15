@@ -5,7 +5,7 @@ import random
 from torch.utils.data import Dataset, Sampler
 from tqdm import tqdm
 from config import Config
-from latents import *
+from latents import normalize_latents
 
 CACHE_DIR = Config.cache_dir
 LOAD_ENTIRE_DATASET = Config.load_entire_dataset

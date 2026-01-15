@@ -53,6 +53,7 @@ def plot_smoothed_stats(csv_path):
         )
         
         ax_gate.axhline(0, color='white', linestyle=':', alpha=0.5)
+        ax_gate.axhline(1.0, color='white', linestyle='--', alpha=0.3, label='Gate = 1.0')
 
         ax_gate.set_title('Fourier Filter Gate Evolution (Min/Max/Avg)', fontsize=16, color='white', pad=20)
         ax_gate.set_xlabel('Global Step', fontsize=12)

@@ -23,10 +23,31 @@ def rk4_step(model, x, t, dt, text_embeds, cfg, t_mid):
     k4 = cfg_velocity(model, x + dt * k3, t_mid, text_embeds, cfg)
     return x + (dt / 6.0) * (k1 + 2*k2 + 2*k3 + k4)
 
-def euler_to_1(x, t, v):
+def predict_x1_from_velocity(x, t, v):
     return x + (1.0 - t.view(-1, 1, 1, 1)) * v
 
 # Used for SELF-EVAL
 def cfg_guided_position(model, x, t, text_embeds, cfg=1.0):
     v = cfg_velocity(model, x, t, text_embeds, cfg)
-    return euler_to_1(x, t, v)
+    return predict_x1_from_velocity(x, t, v)
+
+def run_sampling_pipeline(model, initial_noise, steps, combined_text_embeds, cfg, sampler_type, shift_val):
+    x = initial_noise.clone()
+    dt = 1.0 / steps
+
+    combined_text = combined_text_embeds 
+    
+    for i in range(steps):
+        t_linear = torch.tensor([i / steps], device=x.device, dtype=x.dtype)
+        t = get_1d_shifted_time(t_linear, shift_val)
+
+        if sampler_type == "euler":
+            x = euler_step(model=model, x=x, t=t, dt=dt, text_embeds=combined_text, cfg=cfg)                
+        elif sampler_type == "rk4":
+            t_mid_linear = torch.tensor([(i + 0.5) / steps], device=x.device, dtype=x.dtype)
+            t_mid = get_1d_shifted_time(t_mid_linear, shift_val)
+            x = rk4_step(model, x, t, dt, combined_text, cfg, t_mid)
+        else:
+            raise ValueError(f"Unknown sampler: {sampler_type}")
+            
+    return x

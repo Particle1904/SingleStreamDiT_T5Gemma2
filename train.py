@@ -9,15 +9,16 @@ import torch.nn.functional as F
 import bitsandbytes as bnb
 from torch.utils.data import DataLoader
 from tqdm import tqdm
-from model import SingleStreamDiTV2
+from model import SingleStreamDiT
 from diffusers import AutoencoderKL
 from PIL import Image
 from torch.optim.swa_utils import AveragedModel, get_ema_multi_avg_fn
 from transformers import get_cosine_schedule_with_warmup
 from config import Config
 from dataset import TextImageDataset, BucketBatchSampler
-from latents import *
-from samplers import *
+from latents import decode_latents_to_image
+from samplers import run_sampling_pipeline
+from losses import calculate_total_loss, get_1d_shifted_time, get_base_loss, get_fourier_amplitude_loss, get_self_eval_loss, predict_x1_from_velocity, prepare_batch_and_targets
 
 # PATHS
 CACHE_DIR = Config.cache_dir
@@ -36,6 +37,8 @@ LOSS_TYPE = Config.loss_type
 USE_SELF_EVAL = Config.use_self_eval
 START_SELF_EVAL_AT = Config.start_self_eval_at
 SELF_EVAL_LAMBDA = Config.self_eval_lambda
+FAL_LAMBDA = Config.fal_lambda
+FCL_LAMBDA = Config.fcl_lambda
 FLIP_AUG = Config.flip_aug
 SHIFT_VAL = Config.shift_val
 SAVE_EVERY = Config.save_every
@@ -72,6 +75,8 @@ torch.backends.cuda.matmul.allow_tf32 = True
 torch.backends.cudnn.allow_tf32 = True
 torch.backends.cudnn.benchmark = True 
 
+gate_learning_rate_factor = 10.0
+
 def setup_dirs():
     os.makedirs(CHECKPOINT_DIR, exist_ok=True)
     os.makedirs(SAMPLES_DIR, exist_ok=True)
@@ -104,19 +109,19 @@ def cleanup_checkpoints(directory, prefix, keep_last_n=1):
 def get_gate_stats(model):
     if hasattr(model, "module"):
         model = model.module
-    
+
     gate_values = []
-    for name, module in model.named_modules():
+    for _, module in model.named_modules():
         if hasattr(module, "gate") and isinstance(module.gate, torch.nn.Parameter):
-            gate_values.append(torch.tanh(module.gate).item())
-            
+            gate_values.append(module.gate.item())
+
     if len(gate_values) == 0:
         return 0.0, 0.0, 0.0
-    
+
     avg_val = sum(gate_values) / len(gate_values)
     min_val = min(gate_values)
     max_val = max(gate_values)
-    
+
     return avg_val, min_val, max_val
 
 class CSVLogger:
@@ -162,44 +167,29 @@ def validate(model, vae, epoch, is_ema=False):
     data = torch.load(TARGET_FILE, map_location="cpu")
     h, w = data["height"], data["width"]    
     text_embeds = data["text_embeds"].unsqueeze(0).to(DEVICE, DTYPE)
-    combined_text = torch.cat([torch.zeros_like(text_embeds), text_embeds], dim=0)
+
+    uncond_embeds = torch.zeros_like(text_embeds)
+    combined_text_embeds = torch.cat([uncond_embeds, text_embeds], dim=0)
 
     torch_generator = torch.Generator(device=DEVICE).manual_seed(42)
-    x = torch.randn(1, 16, h // VAE_DOWNSAMPLE_FACTOR, w // VAE_DOWNSAMPLE_FACTOR, generator=torch_generator, device=DEVICE, dtype=DTYPE)
-    dt = 1.0 / 50    
+    initial_noise = torch.randn(1, 16, h // VAE_DOWNSAMPLE_FACTOR, w // VAE_DOWNSAMPLE_FACTOR, 
+                                generator=torch_generator, device=DEVICE, dtype=DTYPE)
     
     print(f"Validating {'EMA' if is_ema else 'RAW'}...")
     with torch.autocast(device_type="cuda", dtype=DTYPE):
-        for i in range(50):
-            t_val = i / 50
-            t = torch.tensor([t_val], device=DEVICE, dtype=DTYPE)
-
-            if VALIDATE_SAMPLER == "euler":
-                x = euler_step(model=model, x=x, t=t, dt=dt, text_embeds=combined_text, cfg=VALIDATE_CFG)                
-            elif VALIDATE_SAMPLER == "rk4":
-                t_next = torch.tensor([(i + 0.5) / 50], device=DEVICE, dtype=DTYPE)
-                t_mid = t + dt * 0.5
-                
-                x = rk4_step(model, x, t, dt, text_embeds, VALIDATE_CFG, t_mid)
-            else:
-                print("Invalid sampler for validations! Sampling with Euler.")
-                x = euler_step(model=model, x=x, t=t, dt=dt, text_embeds=combined_text, cfg=VALIDATE_CFG) 
+        final_latents = run_sampling_pipeline(model=model, initial_noise=initial_noise, steps=VALIDATE_STEPS, 
+                                              combined_text_embeds=combined_text_embeds, cfg=VALIDATE_CFG, 
+                                              sampler_type=VALIDATE_SAMPLER, shift_val=SHIFT_VAL)
             
-    latents = prepare_latents_for_decode(x, clamp=False)        
-    with torch.autocast(DEVICE, enabled=False):
-        img = vae.decode(latents.float()).sample
-
-    img = (img / 2 + 0.5).clamp(0, 1).cpu().permute(0, 2, 3, 1).float().numpy()
-    img = (img * 255).round().astype("uint8")
-    
+    image = decode_latents_to_image(vae_model=vae, latents=final_latents, device=DEVICE)
     save_path = f"{SAMPLES_DIR}/{'EMA_' if is_ema else 'RAW_'}epoch_{epoch}.png"
-    Image.fromarray(img[0]).save(save_path)
+    Image.fromarray(image[0]).save(save_path)
     model.train()
 
 def train():
     setup_dirs()
     print(f"Loading DiT...")
-    model = SingleStreamDiTV2(in_channels=IN_CHANNELS, gradient_checkpointing=GRADIENT_CHECKPOINTING).to(DEVICE)    
+    model = SingleStreamDiT(in_channels=IN_CHANNELS, gradient_checkpointing=GRADIENT_CHECKPOINTING).to(DEVICE)    
     
     print("Checking if Linux for torch.compile...")
     if sys.platform.startswith('linux'):
@@ -256,7 +246,23 @@ def train():
     warmup_steps = int(total_steps * OPTIMIZER_WARMUP)
     print(f"Schedule: {remaining_epochs} epochs left. Total steps: {total_steps}. Warmup: {warmup_steps}")
 
-    optimizer = bnb.optim.AdamW8bit(model.parameters(), lr=LEARNING_RATE, weight_decay=WEIGHT_DECAY)
+    #optimizer = bnb.optim.AdamW8bit(model.parameters(), lr=LEARNING_RATE, weight_decay=WEIGHT_DECAY)
+    param_base = []
+    param_fourier_gates = []
+    
+    for name, param in model.named_parameters():
+        if 'fourier_filter.gate' in name:
+            param_fourier_gates.append(param)
+        else:
+            param_base.append(param)
+            
+    GATE_LEARNING_RATE = LEARNING_RATE * gate_learning_rate_factor     
+    optimizer_grouped_parameters = [
+        {'params': param_base, 'lr': LEARNING_RATE, 'weight_decay': WEIGHT_DECAY},
+        {'params': param_fourier_gates, 'lr': GATE_LEARNING_RATE, 'weight_decay': 0.0},
+    ]
+    optimizer = bnb.optim.AdamW8bit(optimizer_grouped_parameters, lr=LEARNING_RATE) 
+    
     scheduler = get_cosine_schedule_with_warmup(optimizer, num_warmup_steps=warmup_steps, num_training_steps=total_steps)
 
     if checkpoint_data is not None:
@@ -275,69 +281,26 @@ def train():
 
     for epoch in range(start_epoch, EPOCHS):
         pbar = tqdm(dataloader)
-        optimizer.zero_grad()
-        
+        optimizer.zero_grad()   
+            
         for step, batch in enumerate(pbar):
-            x_1 = batch["latents"].to(DEVICE, dtype=DTYPE)
-            text = batch["text_embeds"].to(DEVICE, dtype=DTYPE)
-                        
-            u = torch.rand(x_1.shape[0], device=DEVICE, dtype=DTYPE)
-            t = get_1d_shifted_time(u, SHIFT_VAL)
+            x_t, t, x_1, target, text = prepare_batch_and_targets(batch, DEVICE, DTYPE, SHIFT_VAL, OFFSET_NOISE)
             
-            x_0 = torch.randn_like(x_1)
-            x_0 = x_0 + OFFSET_NOISE * torch.randn(x_1.shape[0], x_1.shape[1], 1, 1, device=DEVICE, dtype=DTYPE)
-            
-            x_t = (1.0 - t.view(-1,1,1,1)) * x_0 + t.view(-1,1,1,1) * x_1
-
             with torch.autocast(device_type="cuda", dtype=DTYPE):
-                v_pred = model(x_t, t, text)
-                target = x_1 - x_0
-                loss_real = None
-                
-                if LOSS_TYPE == "mse":
-                    loss_real = F.mse_loss(v_pred, target)
-                elif LOSS_TYPE == "l1":
-                    loss_real = F.l1_loss(v_pred, target)
-                else:
-                    loss_real = F.huber_loss(v_pred, target, delta=0.1)    
-                
-                loss = loss_real
-                
                 if USE_SELF_EVAL and epoch > (EPOCHS * START_SELF_EVAL_AT):
-                    x_hat_1 = euler_to_1(x_t, t, v_pred)
-
+                    # If Self-Eval is ON, the EMA forward pass must be wrapped in torch.no_grad()                    
                     with torch.no_grad():
-                        s = t + torch.rand_like(t) * (1.0 - t)
-
-                        noise_s = torch.randn_like(x_hat_1)
-                        x_hat_s = (1.0 - s.view(-1, 1, 1, 1)) * noise_s + s.view(-1, 1, 1, 1) * x_hat_1
-
-                        teacher_net = ema_model.module if hasattr(ema_model, 'module') else ema_model
-
-                        text_uncond = torch.zeros_like(text)
-                        combined_text = torch.cat([text_uncond, text], dim=0)
-
-                        x_self = cfg_guided_position(model=teacher_net, x=x_hat_s, t=s, text_embeds=combined_text, cfg=1.5)
-
-                        x_self = x_hat_1 + (x_self - x_hat_s)
-                        
-                        lambd_weight = ((1.0 - t) / (t + 1e-4)) - ((1.0 - s) / (s + 1e-4))
-                        lambd_weight = lambd_weight.view(-1, 1, 1, 1).clamp(0, 10)
-                        
-                        target_raw = x_1 + lambd_weight * x_self
-                        
-                        norm_clean = torch.linalg.vector_norm(x_1, dim=(1, 2, 3), keepdim=True)
-                        norm_target = torch.linalg.vector_norm(target_raw, dim=(1, 2, 3), keepdim=True)
-                        norm_factor = norm_clean / (norm_target + 1e-6)
-                        x_renorm = target_raw * norm_factor
-                    
-                    loss_self = F.mse_loss(x_hat_1, x_renorm)
-                    loss = loss_real + SELF_EVAL_LAMBDA * loss_self
-                    
-                loss = loss / ACCUM_STEPS
+                        loss = calculate_total_loss(
+                            model, ema_model, x_t, t, x_1, target, text, epoch, EPOCHS, USE_SELF_EVAL,
+                            START_SELF_EVAL_AT, SELF_EVAL_LAMBDA, FAL_LAMBDA, FCL_LAMBDA, LOSS_TYPE, 
+                            ACCUM_STEPS)
+                else:
+                    loss = calculate_total_loss(
+                        model, ema_model, x_t, t, x_1, target, text, epoch, EPOCHS, USE_SELF_EVAL,
+                        START_SELF_EVAL_AT, SELF_EVAL_LAMBDA, FAL_LAMBDA, FCL_LAMBDA, LOSS_TYPE, 
+                        ACCUM_STEPS)
 
             loss.backward()
-            
             if (step + 1) % ACCUM_STEPS == 0:
                 torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
                 optimizer.step()
@@ -347,13 +310,11 @@ def train():
                 global_step += 1
             
             current_loss = loss.item() * ACCUM_STEPS
-            
-            is_self_e = USE_SELF_EVAL and epoch > (EPOCHS * START_SELF_EVAL_AT)
-            self_e_status = "ON" if is_self_e else "OFF"
             if step % 10 == 0:
                 lr_current = optimizer.param_groups[0]['lr']
-                avg_gate, min_gate, max_gate = get_gate_stats(model)           
-                pbar.set_description(f"Ep {epoch} | Loss: {current_loss:.4f} | FGate (Avg-Min-Max): {avg_gate:.4f} [{min_gate:.3f}/{max_gate:.3f}] | LR: {lr_current:.6f}")
+                avg_gate, min_gate, max_gate = get_gate_stats(model)      
+                self_eval_status = "On" if USE_SELF_EVAL and epoch > (EPOCHS * START_SELF_EVAL_AT) else "Off"
+                pbar.set_description(f"Ep {epoch}|Loss: {current_loss:.3f}|LR: {lr_current:.6f}|Gate(avg-min-max): {avg_gate:.3f}[{min_gate:.3f}/{max_gate:.3f}]|Self-E: {self_eval_status}|")
                 logger.log(epoch, global_step, current_loss, lr_current, avg_gate, min_gate, max_gate)
 
         if epoch > 0 and epoch % VALIDATE_EVERY == 0:

@@ -127,6 +127,16 @@ class Config:
     self_eval_lambda = 0.3
     
     # ============================================================
+    # REGION:  Fourier Amplitude Loss
+    # ============================================================
+    fal_lambda = 0.1
+    # ============================================================
+    # REGION:  Fourier Correlation Loss
+    # ============================================================
+    fcl_lambda = 0.1
+    # Set to 0 to disable the final stack
+    fourier_stack_depth = 2
+    # ============================================================
     # REGION: OPTIMIZATION & PRECISION
     # Runtime and numerical behavior
     # ============================================================

@@ -59,21 +59,21 @@ class FourierFilter(nn.Module):
         self.low_mlp = nn.Sequential(
             nn.Linear(1, hidden_dim),
             nn.SiLU(),
-            nn.Linear(hidden_dim, dim)
+            nn.Linear(hidden_dim, dim * 2)
         )
 
         self.high_mlp = nn.Sequential(
             nn.Linear(1, hidden_dim),
             nn.SiLU(),
-            nn.Linear(hidden_dim, dim)
+            nn.Linear(hidden_dim, dim * 2)
         )
 
         self.raw_cutoff = nn.Parameter(torch.tensor(-1.0))
         self.raw_scale = nn.Parameter(torch.tensor(3.0))
-        self.gate = nn.Parameter(torch.zeros(1))
+        self.gate = nn.Parameter(torch.ones(1) * 0.2)
 
         for mlp in (self.low_mlp, self.high_mlp):
-            nn.init.zeros_(mlp[-1].weight)
+            nn.init.normal_(mlp[-1].weight, std=0.02)
             nn.init.constant_(mlp[-1].bias, 0.0)
     
     @staticmethod
@@ -97,19 +97,26 @@ class FourierFilter(nn.Module):
         r = self.get_normalized_radius(h, w, x.device)
         r_flat = r.reshape(-1, 1)
 
-        log_gain_low = self.low_mlp(r_flat)
-        log_gain_high = self.high_mlp(r_flat)
+        log_gain_low_2c = self.low_mlp(r_flat)
+        log_gain_high_2c = self.high_mlp(r_flat)
         
-        gain_low = torch.exp(torch.clamp(log_gain_low, -5, 5))
-        gain_high = torch.exp(torch.clamp(log_gain_high, -5, 5))
+        log_gain_low_real, log_gain_low_imag = log_gain_low_2c.chunk(2, dim=-1)
+        log_gain_high_real, log_gain_high_imag = log_gain_high_2c.chunk(2, dim=-1)
+        
+        gain_low_real = torch.exp(torch.clamp(log_gain_low_real, -5, 5))
+        gain_high_real = torch.exp(torch.clamp(log_gain_high_real, -5, 5))
+        gain_low_imag = torch.exp(torch.clamp(log_gain_low_imag, -5, 5))
+        gain_high_imag = torch.exp(torch.clamp(log_gain_high_imag, -5, 5))
 
         cutoff = torch.sigmoid(self.raw_cutoff)
         scale = F.softplus(self.raw_scale)
-        
         mask = torch.sigmoid((cutoff - r_flat) * scale)
         
-        final_gain_flat = mask * gain_low + (1.0 - mask) * gain_high
-        final_gain = final_gain_flat.view(h_freq, w_freq, C)
+        final_gain_real_flat = mask * gain_low_real + (1.0 - mask) * gain_high_real
+        final_gain_imag_flat = mask * gain_low_imag + (1.0 - mask) * gain_high_imag
+        final_gain_complex_flat = torch.complex(final_gain_real_flat, final_gain_imag_flat)
+        
+        final_gain = final_gain_complex_flat.view(h_freq, w_freq, C)
 
         x_fft_filtered = x_fft * final_gain.unsqueeze(0)
         
@@ -141,7 +148,7 @@ def apply_rope(x, cos, sin):
     return rotated.to(dtype=x.dtype)
 
 class VisualFusionBlock(nn.Module):
-    def __init__(self, hidden_size, num_heads, dropout=0.0):
+    def __init__(self, hidden_size, num_heads, dropout=0.0, use_fourier=True):
         super().__init__()
         self.num_heads = num_heads
         self.head_dim = hidden_size // num_heads
@@ -159,8 +166,10 @@ class VisualFusionBlock(nn.Module):
         
         self.feed_forward = SwiGLU(hidden_size, hidden_size * 4)
 
-        self.fourier_filter = FourierFilter(hidden_size)
-        self.fourier_norm = RMSNorm(hidden_size)
+        self.use_fourier = use_fourier
+        if self.use_fourier:
+            self.fourier_filter = FourierFilter(hidden_size)
+            self.fourier_norm = RMSNorm(hidden_size)
         
         self.adaLN_modulation = nn.Sequential(
             nn.SiLU(), 
@@ -216,7 +225,7 @@ class VisualFusionBlock(nn.Module):
         
         ffn_out = self.feed_forward(x_modulated_ffn)
         
-        if img_h is not None and img_w is not None:
+        if self.use_fourier and img_h is not None and img_w is not None:
             img_tokens = x_modulated_ffn[:, img_start_idx:, :]
             fourier_input = self.fourier_norm(img_tokens)
             fourier_out = self.fourier_filter(fourier_input, img_h, img_w)
@@ -257,7 +266,7 @@ class ContextRefinerBlock(nn.Module):
         x = x + self.feed_forward(x_norm_ffn)
         return x
 
-class SingleStreamDiTV2(nn.Module):
+class SingleStreamDiT(nn.Module):
     def __init__(self, 
                  in_channels=Config.in_channels, 
                  patch_size=Config.patch_size, 
@@ -267,13 +276,15 @@ class SingleStreamDiTV2(nn.Module):
                  text_embed_dim=Config.text_embed_dim, 
                  gradient_checkpointing=Config.gradient_checkpointing, 
                  refiner_depth=Config.refiner_depth, 
-                 max_token_length=Config.max_token_length, 
+                 fourier_stack_depth=Config.fourier_stack_depth,
+                 max_token_length=Config.max_token_length,                  
                  dropout=Config.model_dropout):
         super().__init__()
         self.gradient_checkpointing = gradient_checkpointing
         self.patch_size = patch_size
         self.in_channels = in_channels
         self.hidden_size = hidden_size
+        self.fourier_stack_depth = fourier_stack_depth
         
         patch_dim = in_channels * (patch_size ** 2)
         
@@ -290,9 +301,20 @@ class SingleStreamDiTV2(nn.Module):
         self.t_embedder = nn.Sequential(nn.Linear(256, hidden_size), nn.SiLU(), nn.Linear(hidden_size, hidden_size))
         
         # Architecture components
-        self.noise_refiner = nn.ModuleList([VisualFusionBlock(hidden_size, num_heads, dropout=dropout) for _ in range(refiner_depth)])
+        self.noise_refiner = nn.ModuleList([VisualFusionBlock(hidden_size, num_heads, dropout=dropout, use_fourier=True) for _ in range(refiner_depth)])
         self.context_refiner = nn.ModuleList([ContextRefinerBlock(hidden_size, num_heads) for _ in range(refiner_depth)])
-        self.blocks = nn.ModuleList([VisualFusionBlock(hidden_size, num_heads, dropout=dropout) for _ in range(depth)])
+        self.blocks = nn.ModuleList([VisualFusionBlock(hidden_size, num_heads, dropout=dropout, use_fourier=False) for _ in range(depth)])
+        
+        self.final_fourier_blocks = nn.ModuleList()
+    
+        if self.fourier_stack_depth > 0:
+            for _ in range(2):
+                block = nn.ModuleDict({
+                    'norm': RMSNorm(hidden_size),
+                    'filter': FourierFilter(hidden_size)
+                })
+                self.final_fourier_blocks.append(block)
+        
         self.final_norm = RMSNorm(hidden_size)
         self.final_layer = nn.Linear(hidden_size, patch_dim)
         
@@ -351,7 +373,17 @@ class SingleStreamDiTV2(nn.Module):
         
         # 7. Unpatchify
         img_token_len = grid_h * grid_w
-        x_out = x_concat[:, -img_token_len:, :]        
+        x_out = x_concat[:, -img_token_len:, :]    
+        
+        # 8. Final Fourier
+        if self.fourier_stack_depth > 0:
+            current_x = x_out
+            for block in self.final_fourier_blocks:
+                norm_out = block['norm'](current_x)
+                correction = block['filter'](norm_out, grid_h, grid_w)
+                current_x = current_x + correction
+            x_out = current_x
+            
         x_out = self.final_norm(x_out)        
         x_out = self.final_layer(x_out)        
         x_out = self.unpatchify(x_out, grid_h, grid_w)
@@ -420,6 +452,13 @@ class SingleStreamDiTV2(nn.Module):
             nn.init.constant_(block.adaLN_modulation[-1].weight, 0)
             nn.init.constant_(block.adaLN_modulation[-1].bias, 0)
         
+        final_filter_modules = []
+        for block in self.final_fourier_blocks:
+            final_filter_modules.append(block['filter'])
+        
         for module in self.modules():
             if isinstance(module, FourierFilter):
-                nn.init.constant_(module.gate, 0.1)
+                if module in final_filter_modules:
+                    nn.init.constant_(module.gate, 0.3) 
+                else:
+                    nn.init.constant_(module.gate, 1e-3)
