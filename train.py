@@ -18,6 +18,8 @@ from dataset import TextImageDataset, BucketBatchSampler
 from latents import decode_latents_to_image
 from samplers import run_sampling_pipeline
 from losses import calculate_total_loss, prepare_batch_and_targets
+from accelerate import Accelerator
+import wandb
 
 # PATHS
 CACHE_DIR = Config.cache_dir
@@ -74,7 +76,7 @@ torch.backends.cuda.matmul.allow_tf32 = True
 torch.backends.cudnn.allow_tf32 = True
 torch.backends.cudnn.benchmark = True 
 
-gate_learning_rate_factor = 10.0
+gate_learning_rate_factor = 20
 
 def setup_dirs():
     os.makedirs(CHECKPOINT_DIR, exist_ok=True)
@@ -156,7 +158,9 @@ def print_model_size(model):
     print(f"="*50 + "\n")
 
 @torch.no_grad()
-def validate(model, vae, epoch, is_ema=False):
+def validate(accelerator, model, vae, epoch, global_step, is_ema=False):
+    if not accelerator.is_main_process:
+        return
     model.eval()
     
     if not os.path.exists(TARGET_FILE):
@@ -179,16 +183,27 @@ def validate(model, vae, epoch, is_ema=False):
         final_latents = run_sampling_pipeline(model=model, initial_noise=initial_noise, steps=VALIDATE_STEPS, 
                                               combined_text_embeds=combined_text_embeds, cfg=VALIDATE_CFG, 
                                               sampler_type=VALIDATE_SAMPLER, shift_val=SHIFT_VAL)
-            
-    image = decode_latents_to_image(vae_model=vae, latents=final_latents, device=DEVICE)
-    save_path = f"{SAMPLES_DIR}/{'EMA_' if is_ema else 'RAW_'}epoch_{epoch}.png"
-    Image.fromarray(image[0]).save(save_path)
+       
+    if accelerator.is_main_process:
+        image = decode_latents_to_image(vae_model=vae, latents=final_latents, device=DEVICE)
+        accelerator.get_tracker("wandb").log(
+            {"validation_sample": wandb.Image(image)}, step=global_step
+        )
+        save_path = f"{SAMPLES_DIR}/{'EMA_' if is_ema else 'RAW_'}epoch_{epoch}.png"
+        Image.fromarray(image[0]).save(save_path)
     model.train()
 
 def train():
-    setup_dirs()
+    accelerator = Config.accelerator
+    if accelerator.is_main_process:
+        accelerator.init_trackers(project_name=PROJECT_NAME,
+            config={k: v for k, v in Config.__dict__.items() if not k.startswith("__")}
+        )
+    
+    if accelerator.is_main_process:
+        setup_dirs()
     print(f"Loading DiT...")
-    model = SingleStreamDiT(in_channels=IN_CHANNELS, gradient_checkpointing=GRADIENT_CHECKPOINTING).to(DEVICE)    
+    model = SingleStreamDiT(in_channels=IN_CHANNELS, gradient_checkpointing=GRADIENT_CHECKPOINTING).to(DEVICE, dtype=DTYPE)    
     
     print("Checking if Linux for torch.compile...")
     if sys.platform.startswith('linux'):
@@ -217,6 +232,7 @@ def train():
         
         if 'model_state_dict' in checkpoint_data:
             model.load_state_dict(checkpoint_data['model_state_dict'])
+            model.to(DTYPE)
         else:
             model.load_state_dict(checkpoint_data)
             
@@ -264,6 +280,8 @@ def train():
     
     scheduler = get_cosine_schedule_with_warmup(optimizer, num_warmup_steps=warmup_steps, num_training_steps=total_steps)
 
+    model, optimizer, dataloader, scheduler = accelerator.prepare(model, optimizer, dataloader, scheduler)
+
     if checkpoint_data is not None:
         if not RESET_OPTIMIZER and 'optimizer_state_dict' in checkpoint_data:
             print("Restoring Optimizer and Scheduler state...")
@@ -279,13 +297,13 @@ def train():
     print(f"Training Start: {EPOCHS} Epochs, {total_steps} Steps, Shift={SHIFT_VAL}")
 
     for epoch in range(start_epoch, EPOCHS):
-        pbar = tqdm(dataloader)
+        pbar = tqdm(dataloader, disable=not accelerator.is_main_process)
         optimizer.zero_grad()   
             
         for step, batch in enumerate(pbar):
             x_t, t, x_1, target, text = prepare_batch_and_targets(batch, DEVICE, DTYPE, SHIFT_VAL, OFFSET_NOISE)
             
-            with torch.autocast(device_type="cuda", dtype=DTYPE):
+            with accelerator.autocast():
                 if USE_SELF_EVAL and epoch > (EPOCHS * START_SELF_EVAL_AT):
                     # If Self-Eval is ON, the EMA forward pass must be wrapped in torch.no_grad()                    
                     with torch.no_grad():
@@ -299,57 +317,67 @@ def train():
                         START_SELF_EVAL_AT, SELF_EVAL_LAMBDA, FAL_LAMBDA, FCL_LAMBDA, LOSS_TYPE, 
                         ACCUM_STEPS)
 
-            loss.backward()
+            accelerator.backward(loss)
             if (step + 1) % ACCUM_STEPS == 0:
-                torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
                 optimizer.step()
                 scheduler.step()
                 optimizer.zero_grad()
-                ema_model.update_parameters(model)
+                if accelerator.is_main_process:
+                    ema_model.update_parameters(accelerator.unwrap_model(model))
                 global_step += 1
             
-            current_loss = loss.item() * ACCUM_STEPS
-            if step % 10 == 0:
-                lr_current = optimizer.param_groups[0]['lr']
-                avg_gate, min_gate, max_gate = get_gate_stats(model)      
-                self_eval_status = "On" if USE_SELF_EVAL and epoch > (EPOCHS * START_SELF_EVAL_AT) else "Off"
-                pbar.set_description(f"Ep {epoch}|Loss: {current_loss:.3f}|LR: {lr_current:.6f}|Gate(avg-min-max): {avg_gate:.3f}[{min_gate:.3f}/{max_gate:.3f}]|Self-E: {self_eval_status}|")
-                logger.log(epoch, global_step, current_loss, lr_current, avg_gate, min_gate, max_gate)
+            if accelerator.is_main_process:
+                current_loss = loss.item() * ACCUM_STEPS
+                if step % 10 == 0:
+                    lr_current = optimizer.param_groups[0]['lr']
+                    avg_gate, min_gate, max_gate = get_gate_stats(model)      
+                    self_eval_status = "On" if USE_SELF_EVAL and epoch > (EPOCHS * START_SELF_EVAL_AT) else "Off"
+                    pbar.set_description(f"Ep {epoch}|Loss: {current_loss:.3f}|LR: {lr_current:.6f}|Gate(avg-min-max): {avg_gate:.3f}[{min_gate:.3f}/{max_gate:.3f}]|Self-E: {self_eval_status}|")
+                    logger.log(epoch, global_step, current_loss, lr_current, avg_gate, min_gate, max_gate)
+                    accelerator.log({"train_loss": current_loss, 
+                                     "lr": optimizer.param_groups[0]['lr'], 
+                                     "gate_avg": avg_gate}, 
+                                     step=global_step)
 
         if epoch > 0 and epoch % VALIDATE_EVERY == 0:
-            validate(ema_model.module, vae, epoch, is_ema=True)
-            validate(model, vae, epoch, is_ema=False)
+            validate(accelerator, model, vae, epoch, global_step, is_ema=False)
+            validate(accelerator, ema_model.module, vae, epoch, global_step, is_ema=True)
             
-        if epoch > 0 and epoch % SAVE_EVERY == 0:
+        if accelerator.is_main_process and epoch > 0 and epoch % SAVE_EVERY == 0:
+            unwrapped_model = accelerator.unwrap_model(model)
             save_data = {
                 'epoch': epoch,
                 'global_step': global_step,
-                'model_state_dict': model.state_dict(),
+                'model_state_dict': unwrapped_model.state_dict(),
                 'ema_state_dict': ema_model.module.state_dict(),
                 'optimizer_state_dict': optimizer.state_dict(),
                 'scheduler_state_dict': scheduler.state_dict(),
             }
-            # Save new and delete old.
             torch.save(save_data, f"{CHECKPOINT_DIR}/full_state_epoch_{epoch}.pt")
             cleanup_checkpoints(CHECKPOINT_DIR, "full_state_", keep_last_n=1)
             
-            # Save new and delete old, keeping last 3 EMA
             torch.save(ema_model.module.state_dict(), f"{CHECKPOINT_DIR}/ema_weights_epoch_{epoch}.pt")
             cleanup_checkpoints(CHECKPOINT_DIR, "ema_weights_", keep_last_n=3)
             
-    print(f"Loop Finished. Forcing save at Epoch {EPOCHS}...")
-    
-    validate(ema_model.module, vae, EPOCHS, is_ema=True)
-    save_data = {
-        'epoch': EPOCHS,
-        'global_step': global_step,
-        'model_state_dict': model.state_dict(),
-        'ema_state_dict': ema_model.module.state_dict(),
-        'optimizer_state_dict': optimizer.state_dict(),
-        'scheduler_state_dict': scheduler.state_dict(),
-    }
-    torch.save(save_data, f"{CHECKPOINT_DIR}/full_state_final.pt")
-    torch.save(ema_model.module.state_dict(), f"{CHECKPOINT_DIR}/ema_weights_final.pt")
+            
+    if accelerator.is_main_process:
+        print(f"Loop Finished. Forcing save at Epoch {EPOCHS}...")
+        validate(accelerator, ema_model.module, vae, EPOCHS, global_step, is_ema=True)
+        
+        unwrapped_model = accelerator.unwrap_model(model)
+        save_data = {
+            'epoch': EPOCHS,
+            'global_step': global_step,
+            'model_state_dict': unwrapped_model.state_dict(),
+            'ema_state_dict': ema_model.module.state_dict(),
+            'optimizer_state_dict': optimizer.state_dict(),
+            'scheduler_state_dict': scheduler.state_dict(),
+        }
+        torch.save(save_data, f"{CHECKPOINT_DIR}/full_state_final.pt")
+        torch.save(ema_model.module.state_dict(), f"{CHECKPOINT_DIR}/ema_weights_final.pt")
+        
+        # End the WandB run gracefully
+        accelerator.end_training()
     
 if __name__ == "__main__":
     start_time = time.time()

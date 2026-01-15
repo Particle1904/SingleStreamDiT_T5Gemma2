@@ -1,5 +1,10 @@
 import os
 import torch
+from accelerate.utils import set_seed
+from accelerate import Accelerator
+
+_accelerator = Accelerator()
+set_seed(42)
 
 class Config:
     # ============================================================
@@ -13,14 +18,21 @@ class Config:
     # REGION: PROJECT & PATHS
     # General experiment metadata and filesystem layout
     # ============================================================
+    is_kaggle = os.path.exists("/kaggle/working")
+    
+    if is_kaggle:
+        output_dir = "/kaggle/working/output"
+        cache_dir = "/kaggle/input/oxfordflowers/cached_data"
+    else:
+        cache_dir = "./cached_data"  
+        output_dir = "./output"
+    
     project_name = "flowers"
-    output_dir = "./output"
+    dataset_dir = "./dataset"
     checkpoint_dir = os.path.join(output_dir, "checkpoints")
     samples_dir = os.path.join(output_dir, "samples")
     log_dir = os.path.join(output_dir, "logs")
     log_file = os.path.join(log_dir, f"{project_name}_log.csv")    
-    dataset_dir = "./dataset"
-    cache_dir = "./cached_data"    
     # Used by sanity_check / cache inspection utilities
     target_file = os.path.join(cache_dir, "39.pt")        
     # Resume training from a full checkpoint (model + optimizer + EMA)
@@ -93,8 +105,8 @@ class Config:
     # Total number of epochs (from scratch or resumed)
     epochs = 1500
     # Effective batch size per optimizer step
-    batch_size = 16
-    accum_steps = 2
+    batch_size = 12
+    accum_steps = 1
     # Loss for velocity prediction
     # Options: "mse", "l1", "huber"
     loss_type = "mse"
@@ -149,7 +161,8 @@ class Config:
     # ============================================================
     # REGION: SYSTEM & DATALOADING
     # ============================================================
-    device = "cuda"
+    accelerator = _accelerator
+    device = _accelerator.device
     # Cache entire dataset in RAM (recommended for <= ~20k images)
     load_entire_dataset = True
     num_workers = 4 if os.name != 'nt' else 0
@@ -171,4 +184,4 @@ class Config:
     inference_steps = 50
     guidance_scale = 3.5
     # "euler" or "rk4"
-    sampler = "rk4"       
+    sampler = "rk4"

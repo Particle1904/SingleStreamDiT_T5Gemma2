@@ -15,7 +15,7 @@ from samplers import run_sampling_pipeline
 from losses import calculate_total_loss, prepare_batch_and_targets
 
 TARGET_FILE = Config.target_file
-DEVICE = Config.device
+DEVICE = "cuda"
 DTYPE = Config.dtype
 
 steps = 1000

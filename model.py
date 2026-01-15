@@ -57,15 +57,15 @@ class FourierFilter(nn.Module):
     def __init__(self, dim, hidden_dim=64):
         super().__init__()
         self.low_mlp = nn.Sequential(
-            nn.Linear(1, hidden_dim),
+            nn.Linear(1, hidden_dim, bias=False),
             nn.SiLU(),
-            nn.Linear(hidden_dim, dim * 2)
+            nn.Linear(hidden_dim, dim * 2, bias=False)
         )
 
         self.high_mlp = nn.Sequential(
-            nn.Linear(1, hidden_dim),
+            nn.Linear(1, hidden_dim, bias=False),
             nn.SiLU(),
-            nn.Linear(hidden_dim, dim * 2)
+            nn.Linear(hidden_dim, dim * 2, bias=False)
         )
 
         self.raw_cutoff = nn.Parameter(torch.tensor(-1.0))
@@ -74,7 +74,6 @@ class FourierFilter(nn.Module):
 
         for mlp in (self.low_mlp, self.high_mlp):
             nn.init.normal_(mlp[-1].weight, std=0.02)
-            nn.init.constant_(mlp[-1].bias, 0.0)
     
     @staticmethod
     @lru_cache(maxsize=32)
@@ -95,18 +94,13 @@ class FourierFilter(nn.Module):
         h_freq, w_freq = x_fft.shape[1], x_fft.shape[2]
         
         r = self.get_normalized_radius(h, w, x.device)
-        r_flat = r.reshape(-1, 1)
+        r_flat = r.reshape(-1, 1).to(dtype)
 
         log_gain_low_2c = self.low_mlp(r_flat)
         log_gain_high_2c = self.high_mlp(r_flat)
         
-        log_gain_low_real, log_gain_low_imag = log_gain_low_2c.chunk(2, dim=-1)
-        log_gain_high_real, log_gain_high_imag = log_gain_high_2c.chunk(2, dim=-1)
-        
-        gain_low_real = torch.exp(torch.clamp(log_gain_low_real, -5, 5))
-        gain_high_real = torch.exp(torch.clamp(log_gain_high_real, -5, 5))
-        gain_low_imag = torch.exp(torch.clamp(log_gain_low_imag, -5, 5))
-        gain_high_imag = torch.exp(torch.clamp(log_gain_high_imag, -5, 5))
+        gain_low_real, gain_low_imag = log_gain_low_2c.chunk(2, dim=-1)
+        gain_high_real, gain_high_imag = log_gain_high_2c.chunk(2, dim=-1)
 
         cutoff = torch.sigmoid(self.raw_cutoff)
         scale = F.softplus(self.raw_scale)
@@ -114,7 +108,8 @@ class FourierFilter(nn.Module):
         
         final_gain_real_flat = mask * gain_low_real + (1.0 - mask) * gain_high_real
         final_gain_imag_flat = mask * gain_low_imag + (1.0 - mask) * gain_high_imag
-        final_gain_complex_flat = torch.complex(final_gain_real_flat, final_gain_imag_flat)
+        
+        final_gain_complex_flat = torch.complex(final_gain_real_flat.float(), final_gain_imag_flat.float())        
         
         final_gain = final_gain_complex_flat.view(h_freq, w_freq, C)
 
@@ -232,8 +227,7 @@ class VisualFusionBlock(nn.Module):
 
             ffn_out[:, img_start_idx:, :] += fourier_out
 
-        x = x + gate_mlp.unsqueeze(1) * self.dropout(ffn_out)
-        
+        x = x + gate_mlp.unsqueeze(1) * self.dropout(ffn_out)        
         return x
 
 class ContextRefinerBlock(nn.Module):
@@ -461,4 +455,4 @@ class SingleStreamDiT(nn.Module):
                 if module in final_filter_modules:
                     nn.init.constant_(module.gate, 0.3) 
                 else:
-                    nn.init.constant_(module.gate, 1e-3)
+                    nn.init.constant_(module.gate, 0.5)
