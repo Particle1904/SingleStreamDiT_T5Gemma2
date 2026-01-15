@@ -63,10 +63,14 @@ class FourierFilter(nn.Module):
 
         self.raw_cutoff = nn.Parameter(torch.tensor(-1.0))
         self.raw_scale = nn.Parameter(torch.tensor(3.0))
-        self.gate = nn.Parameter(torch.ones(1) * 0.2)
+        
+        self.gate = nn.Parameter(torch.ones(1) * 0.25)
 
-        for mlp in (self.low_mlp, self.high_mlp):
-            nn.init.normal_(mlp[-1].weight, std=0.02)
+        nn.init.constant_(self.low_mlp[-1].weight, 0)
+        nn.init.constant_(self.high_mlp[-1].weight, 0)
+        
+        nn.init.normal_(self.low_mlp[0].weight, std=0.02)
+        nn.init.normal_(self.high_mlp[0].weight, std=0.02)
     
     @staticmethod
     @lru_cache(maxsize=32)
@@ -89,25 +93,33 @@ class FourierFilter(nn.Module):
         r = self.get_normalized_radius(h, w, x.device)
         r_flat = r.reshape(-1, 1).to(dtype)
 
-        log_gain_low_2c = self.low_mlp(r_flat)
-        log_gain_high_2c = self.high_mlp(r_flat)
+        raw_low = self.low_mlp(r_flat)   
+        raw_high = self.high_mlp(r_flat) 
         
-        gain_low_real, gain_low_imag = log_gain_low_2c.chunk(2, dim=-1)
-        gain_high_real, gain_high_imag = log_gain_high_2c.chunk(2, dim=-1)
+        amp_log_low, phase_low = raw_low.chunk(2, dim=-1)
+        amp_log_high, phase_high = raw_high.chunk(2, dim=-1)
 
         cutoff = torch.sigmoid(self.raw_cutoff)
         scale = F.softplus(self.raw_scale)
         mask = torch.sigmoid((cutoff - r_flat) * scale)
         
-        final_gain_real_flat = mask * gain_low_real + (1.0 - mask) * gain_high_real
-        final_gain_imag_flat = mask * gain_low_imag + (1.0 - mask) * gain_high_imag
+        amp_log = mask * amp_log_low + (1.0 - mask) * amp_log_high
+        phase_shift = mask * phase_low + (1.0 - mask) * phase_high
+
+        amp_gain = torch.exp(torch.tanh(amp_log))
         
-        final_gain_complex_flat = torch.complex(final_gain_real_flat.float(), final_gain_imag_flat.float())        
-        final_gain = final_gain_complex_flat.view(h_freq, w_freq, C)
+        phase_shift = phase_shift * torch.pi 
+
+        filter_real = amp_gain * torch.cos(phase_shift)
+        filter_imag = amp_gain * torch.sin(phase_shift)
+        
+        complex_filter = torch.complex(filter_real, filter_imag)
+        final_gain = complex_filter.view(h_freq, w_freq, C)
 
         x_fft_filtered = x_fft * final_gain.unsqueeze(0)
         
         x_out = torch.fft.irfft2(x_fft_filtered, s=(h, w), dim=(1, 2), norm='ortho')
+        
         return x_out.reshape(B, L, C).to(dtype) * torch.tanh(self.gate)
     
 @lru_cache(maxsize=32)

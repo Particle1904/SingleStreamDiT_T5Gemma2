@@ -23,7 +23,7 @@ learning_rate = 4e-4
 sample_every = 200
 sample_steps = 50
 enable_rk4 = False
-gate_learning_rate_factor = 20
+gate_learning_rate_factor = 1
 
 LOSS_TYPE = Config.loss_type
 VAE_ID = Config.vae_id
