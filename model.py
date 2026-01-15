@@ -5,6 +5,30 @@ import math
 from torch.utils.checkpoint import checkpoint
 from functools import lru_cache
 from config import Config
+    
+@lru_cache(maxsize=32)
+def create_2d_rope_grid(h, w, dim, device):
+    grid_h = torch.arange(h, device=device)
+    grid_w = torch.arange(w, device=device)
+    grid = torch.meshgrid(grid_h, grid_w, indexing='ij')
+    grid = torch.stack(grid, dim=-1).reshape(-1, 2)
+    
+    inv_freq = 1.0 / (Config.rope_base ** (torch.arange(0, dim, 4, device=device).float() / dim))
+    t_h = grid[:, 0:1] * inv_freq
+    t_w = grid[:, 1:2] * inv_freq
+    
+    freqs = torch.cat([t_h, t_w], dim=-1)
+    return torch.cos(freqs), torch.sin(freqs)
+
+def apply_rope(x, cos, sin):
+    x_fp32 = x.float()
+    cos_fp32 = cos.float()
+    sin_fp32 = sin.float()
+    d = x_fp32.shape[-1]
+    x1 = x_fp32[..., :d//2]
+    x2 = x_fp32[..., d//2:]
+    rotated = torch.cat([x1 * cos_fp32 - x2 * sin_fp32, x1 * sin_fp32 + x2 * cos_fp32], dim=-1)
+    return rotated.to(dtype=x.dtype)
 
 class RMSNorm(nn.Module):
     def __init__(self, dim, eps=1e-6):
@@ -136,30 +160,6 @@ class FourierFilter(nn.Module):
         x_out = torch.fft.irfft2(x_fft_filtered, s=(h, w), dim=(1, 2), norm='ortho')
         
         return x_out.reshape(B, L, C).to(dtype) * torch.tanh(self.gate)
-    
-@lru_cache(maxsize=32)
-def create_2d_rope_grid(h, w, dim, device):
-    grid_h = torch.arange(h, device=device)
-    grid_w = torch.arange(w, device=device)
-    grid = torch.meshgrid(grid_h, grid_w, indexing='ij')
-    grid = torch.stack(grid, dim=-1).reshape(-1, 2)
-    
-    inv_freq = 1.0 / (Config.rope_base ** (torch.arange(0, dim, 4, device=device).float() / dim))
-    t_h = grid[:, 0:1] * inv_freq
-    t_w = grid[:, 1:2] * inv_freq
-    
-    freqs = torch.cat([t_h, t_w], dim=-1)
-    return torch.cos(freqs), torch.sin(freqs)
-
-def apply_rope(x, cos, sin):
-    x_fp32 = x.float()
-    cos_fp32 = cos.float()
-    sin_fp32 = sin.float()
-    d = x_fp32.shape[-1]
-    x1 = x_fp32[..., :d//2]
-    x2 = x_fp32[..., d//2:]
-    rotated = torch.cat([x1 * cos_fp32 - x2 * sin_fp32, x1 * sin_fp32 + x2 * cos_fp32], dim=-1)
-    return rotated.to(dtype=x.dtype)
 
 class VisualFusionBlock(nn.Module):
     def __init__(self, hidden_size, num_heads, dropout=0.0, use_fourier=True):
@@ -290,7 +290,8 @@ class SingleStreamDiT(nn.Module):
                  gradient_checkpointing=Config.gradient_checkpointing, 
                  refiner_depth=Config.refiner_depth, 
                  fourier_stack_depth=Config.fourier_stack_depth,
-                 max_token_length=Config.max_token_length,                  
+                 max_token_length=Config.max_token_length,   
+                 use_fourier_in_refiner=Config.use_fourier_filters_in_refiner,               
                  dropout=Config.model_dropout):
         super().__init__()
         self.gradient_checkpointing = gradient_checkpointing
@@ -298,6 +299,7 @@ class SingleStreamDiT(nn.Module):
         self.in_channels = in_channels
         self.hidden_size = hidden_size
         self.fourier_stack_depth = fourier_stack_depth
+        self.use_fourier_in_refiner= use_fourier_in_refiner
         
         patch_dim = in_channels * (patch_size ** 2)
         
@@ -314,7 +316,7 @@ class SingleStreamDiT(nn.Module):
         self.t_embedder = nn.Sequential(nn.Linear(256, hidden_size), nn.SiLU(), nn.Linear(hidden_size, hidden_size))
         
         # Architecture components
-        self.noise_refiner = nn.ModuleList([VisualFusionBlock(hidden_size, num_heads, dropout=dropout, use_fourier=True) for _ in range(refiner_depth)])
+        self.noise_refiner = nn.ModuleList([VisualFusionBlock(hidden_size, num_heads, dropout=dropout, use_fourier=self.use_fourier_in_refiner) for _ in range(refiner_depth)])
         self.context_refiner = nn.ModuleList([ContextRefinerBlock(hidden_size, num_heads) for _ in range(refiner_depth)])
         self.blocks = nn.ModuleList([VisualFusionBlock(hidden_size, num_heads, dropout=dropout, use_fourier=False) for _ in range(depth)])
         

@@ -77,7 +77,8 @@ def get_self_eval_loss(x_hat_1: torch.Tensor, x_1: torch.Tensor, t: torch.Tensor
     text_uncond = torch.zeros_like(text)
     combined_text = torch.cat([text_uncond, text], dim=0)
     
-    x_self = cfg_guided_position(model=teacher_net, x=x_hat_s, t=s, text_embeds=combined_text, cfg=cfg_val)
+    with torch.no_grad():
+        x_self = cfg_guided_position(model=teacher_net, x=x_hat_s, t=s, text_embeds=combined_text, cfg=cfg_val)
     x_self = x_hat_1 + (x_self - x_hat_s)
     
     lambd_weight = (t / (1.0 - t + 1e-4)) - (s / (1.0 - s + 1e-4))
@@ -96,31 +97,36 @@ def get_self_eval_loss(x_hat_1: torch.Tensor, x_1: torch.Tensor, t: torch.Tensor
 
 def calculate_total_loss(model, ema_model, x_t, t, x_1, target, text, epoch, epochs, use_self_eval, 
                          start_self_eval_at, self_eval_lambda, fal_lambda, fcl_lambda, loss_type, accum_steps):
-    # CFG Prep
-    uncond_zero_embeds = torch.zeros_like(text)
-    combined_training_text = torch.cat([uncond_zero_embeds, text], dim=0)
-    x_t_doubled = torch.cat([x_t, x_t], dim=0)
-    t_doubled = torch.cat([t, t], dim=0)
-    
     # Model forward pass
-    v_out = model(x_t_doubled, t_doubled, combined_training_text)
-    v_uncond, v_cond = v_out.chunk(2, dim=0)
-    v_pred = v_cond
+    v_pred = model(x_t, t, text)
     
     # Base Velocity Loss
     loss_real = get_base_loss(v_pred, target, loss_type)
 
-    # Fourier Amplitude Loss (FAL)
-    x_hat_1 = predict_x1_from_velocity(x_t, t, v_pred)
-    loss_fal = get_fourier_amplitude_loss(x_hat_1, x_1, t, fal_lambda=fal_lambda)
-    loss_fcl = get_fourier_correlation_loss(x_hat_1, x_1, t, fcl_lambda=fcl_lambda)
+    # Initialize FFT Vars
+    loss_fal = 0.0
+    loss_fcl = 0.0
+    x_hat_1 = None 
+    
+    # Check if we need x_hat_1 for Fourier OR Self-Eval
+    need_x_hat = (fal_lambda > 0) or (fcl_lambda > 0) or (use_self_eval and epoch > (epochs * start_self_eval_at))
+
+    if need_x_hat:
+        # Predict the final image from the current velocity
+        x_hat_1 = predict_x1_from_velocity(x_t, t, v_pred)
+        
+        # Calculate Fourier Losses if enabled
+        if fal_lambda > 0:
+            loss_fal = get_fourier_amplitude_loss(x_hat_1, x_1, t, fal_lambda=fal_lambda)
+            
+        if fcl_lambda > 0:
+            loss_fcl = get_fourier_correlation_loss(x_hat_1, x_1, t, fcl_lambda=fcl_lambda)
     
     # Initialize total loss
     loss = loss_real + loss_fal + loss_fcl 
     
-    # Self-Evaluation Loss (Conditional)
+    # Self-Evaluation Loss
     if use_self_eval and epoch > (epochs * start_self_eval_at):
-        # We assume the call is wrapped in torch.no_grad() outside
         s = t + torch.rand_like(t) * (1.0 - t)
         loss_self = get_self_eval_loss(x_hat_1=x_hat_1, x_1=x_1, t=t, s=s, 
                                        ema_model=ema_model, text=text, 
