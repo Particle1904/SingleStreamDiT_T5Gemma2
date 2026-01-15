@@ -206,17 +206,7 @@ def train():
         
     print(f"Loading DiT...")
     model = SingleStreamDiT(in_channels=IN_CHANNELS, gradient_checkpointing=GRADIENT_CHECKPOINTING).to(DEVICE)    
-    
-    print("Checking if Linux for torch.compile...")
-    if sys.platform.startswith('linux'):
-        print("Compiling model (Linux detected)...")
-        try:
-            model = torch.compile(model, mode="max-autotune")
-            print("Compilation successful.")
-        except Exception as e:
-            print(f"Compilation failed: {e}")
-            print("Continuing without compilation.")
-        
+         
     print(f"Loading VAE: {VAE_ID}")
     vae = AutoencoderKL.from_pretrained(VAE_ID).to(DEVICE)
     
@@ -263,7 +253,6 @@ def train():
     warmup_steps = int(total_steps * OPTIMIZER_WARMUP)
     print(f"Schedule: {remaining_epochs} epochs left. Total steps: {total_steps}. Warmup: {warmup_steps}")
 
-    #optimizer = bnb.optim.AdamW8bit(model.parameters(), lr=LEARNING_RATE, weight_decay=WEIGHT_DECAY)
     param_base = []
     param_fourier_gates = []
     
@@ -283,6 +272,16 @@ def train():
     scheduler = get_cosine_schedule_with_warmup(optimizer, num_warmup_steps=warmup_steps, num_training_steps=total_steps)
 
     model, optimizer, dataloader, scheduler = accelerator.prepare(model, optimizer, dataloader, scheduler)
+       
+    print("Checking if Linux for torch.compile...")
+    if sys.platform.startswith('linux'):
+        print("Compiling model (Linux detected)...")
+        try:
+            model = torch.compile(model, mode="max-autotune")
+            print("Compilation successful.")
+        except Exception as e:
+            print(f"Compilation failed: {e}")
+            print("Continuing without compilation.")
 
     if checkpoint_data is not None:
         if not RESET_OPTIMIZER and 'optimizer_state_dict' in checkpoint_data:
