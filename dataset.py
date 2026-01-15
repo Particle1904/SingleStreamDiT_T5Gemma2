@@ -7,28 +7,38 @@ from tqdm import tqdm
 from config import Config
 from latents import normalize_latents
 
-CACHE_DIR = Config.cache_dir
-LOAD_ENTIRE_DATASET = Config.load_entire_dataset
 
-FLIP_AUG = Config.flip_aug
-TEXT_DROPOUT = Config.text_dropout
+# Used for Validation on 200 flowers dataset.
+def split_dataset_indices(total_files, items_per_category=20, val_per_category=4):
+    train_indices = []
+    val_indices = []
+    for i in range(total_files):
+        # 0..19
+        pos = i % items_per_category
+        # if pos is 16, 17, 18, 19 -> Val
+        if pos >= (items_per_category - val_per_category):
+            val_indices.append(i)
+        else:
+            train_indices.append(i)
+    return set(train_indices), set(val_indices)
 
 class TextImageDataset(Dataset):
     def __init__(self):
-        self.files = glob.glob(os.path.join(CACHE_DIR, "*.pt"))
+        self.files = glob.glob(os.path.join(Config.cache_dir, "*.pt"))
+        self.files.sort() 
         if len(self.files) == 0:
-            raise ValueError(f"No .pt files found in {CACHE_DIR}")
+            raise ValueError(f"No .pt files found in {Config.cache_dir}")
         
         self.cache = {}
         
         self.buckets = {}
         
-        print(f"Indexing {len(self.files)} files (RAM Cache: {LOAD_ENTIRE_DATASET})...")
+        print(f"Indexing {len(self.files)} files (RAM Cache: {Config.load_entire_dataset})...")
         for idx, f in enumerate(tqdm(self.files, desc="Loading Dataset", disable=not Config.accelerator.is_main_process)):
             try:
                 d = torch.load(f, map_location="cpu")
                 
-                if LOAD_ENTIRE_DATASET:
+                if Config.load_entire_dataset:
                     self.cache[idx] = d
                 
                 res_key = (d["height"], d["width"])
@@ -43,7 +53,7 @@ class TextImageDataset(Dataset):
         return len(self.files)
 
     def __getitem__(self, idx):
-        if LOAD_ENTIRE_DATASET:
+        if Config.load_entire_dataset:
             data = self.cache[idx]
         else:
             data = torch.load(self.files[idx], map_location="cpu")
@@ -53,10 +63,10 @@ class TextImageDataset(Dataset):
         
         latents = normalize_latents(latents)
         
-        if FLIP_AUG and random.random() < 0.5:
+        if Config.flip_aug and random.random() < 0.5:
             latents = torch.flip(latents, dims=[-1])
             
-        if random.random() < TEXT_DROPOUT:
+        if random.random() < Config.text_dropout:
             text = torch.zeros_like(text)
             
         return {

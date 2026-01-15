@@ -13,61 +13,57 @@ from config import Config
 from latents import decode_latents_to_image
 from samplers import run_sampling_pipeline
 from losses import calculate_total_loss, prepare_batch_and_targets
+import wandb
 
-TARGET_FILE = Config.target_file
 DEVICE = "cuda"
-DTYPE = Config.dtype
 
-steps = 1000
-learning_rate = 4e-4
-sample_every = 200
-sample_steps = 50
-enable_rk4 = False
-gate_learning_rate_factor = 1
+STEPS = 1000
+LEARNING_RATE = 4e-4
+SAMPLE_EVERY = 200
+SAMPLE_STEPS = 50
+ENABLE_RK4 = False
+GATE_LEARNING_RATE_FACTOR = 1
 
-LOSS_TYPE = Config.loss_type
-VAE_ID = Config.vae_id
-SHIFT_VAL = Config.shift_val
-EMA_DECAY = Config.ema_decay
-WEIGHT_DECAY = Config.weight_decay
-IN_CHANNELS = Config.in_channels
-OPTIMIZER_WARMUP = Config.optimizer_warmup
-OFFSET_NOISE = Config.offset_noise
-
-VAE_DOWNSAMPLE_FACTOR = Config.vae_downsample_factor
+RUN_NAME = f"Sanity_FFT_{Config.fourier_stack_depth}"
 
 USE_SELF_EVAL = False 
-SELF_EVAL_LAMBDA = Config.self_eval_lambda  
-START_SELF_EVAL_AT = Config.start_self_eval_at
-FAL_LAMBDA = Config.fal_lambda
-FCL_LAMBDA = Config.fcl_lambda
 
+torch.backends.cuda.enable_flash_sdp(True)
+torch.backends.cuda.enable_mem_efficient_sdp(True)
+torch.backends.cuda.enable_math_sdp(False) 
 torch.backends.cuda.matmul.allow_tf32 = True
 torch.backends.cudnn.allow_tf32 = True
+torch.backends.cudnn.benchmark = True 
 
 def sanity():
-    if not os.path.exists(TARGET_FILE):
-        print(f"Error: {TARGET_FILE} not found.")
+    wandb.init(project=Config.project_name + "_sanity", name=RUN_NAME, 
+               config={"lr": LEARNING_RATE,
+                       "fourier_depth": Config.fourier_stack_depth,
+                       "shift": Config.shift_val,
+                       "loss_type": Config.loss_type
+                       })
+    
+    if not os.path.exists(Config.target_file):
+        print(f"Error: {Config.target_file} not found.")
         return
     
-    print(f"Loading {TARGET_FILE}...")
-    data = torch.load(TARGET_FILE)
+    print(f"Loading {Config.target_file}...")
+    data = torch.load(Config.target_file)
     
-    latents = data["latents"].unsqueeze(0).to(DEVICE, DTYPE)
+    latents = data["latents"].unsqueeze(0).to(DEVICE, Config.dtype)
     
-    text = data["text_embeds"].unsqueeze(0).to(DEVICE, DTYPE)
+    text = data["text_embeds"].unsqueeze(0).to(DEVICE, Config.dtype)
     h, w = data["height"], data["width"]
     
     print(f"Target Resolution: {w}x{h}")
-    print(f"RK4 Enabled: {enable_rk4}")
+    print(f"RK4 Enabled: {ENABLE_RK4}")
     
-    model = SingleStreamDiT(in_channels=IN_CHANNELS, gradient_checkpointing=False).to(DEVICE, DTYPE)
+    model = SingleStreamDiT(in_channels=Config.in_channels, gradient_checkpointing=False).to(DEVICE, Config.dtype)
     
     model.initialize_weights() 
     
-    ema_model = AveragedModel(model, multi_avg_fn=get_ema_multi_avg_fn(EMA_DECAY))
+    ema_model = AveragedModel(model, multi_avg_fn=get_ema_multi_avg_fn(Config.ema_decay))
     
-    #optimizer = bnb.optim.AdamW8bit(model.parameters(), lr=learning_rate, weight_decay=WEIGHT_DECAY)   
     param_base = []
     param_fourier_gates = []
     
@@ -77,44 +73,44 @@ def sanity():
         else:
             param_base.append(param)
             
-    GATE_LEARNING_RATE = learning_rate * gate_learning_rate_factor     
+    GATE_LEARNING_RATE = LEARNING_RATE * GATE_LEARNING_RATE_FACTOR     
     optimizer_grouped_parameters = [
-        {'params': param_base, 'lr': learning_rate, 'weight_decay': WEIGHT_DECAY},
+        {'params': param_base, 'lr': LEARNING_RATE, 'weight_decay': Config.weight_decay},
         {'params': param_fourier_gates, 'lr': GATE_LEARNING_RATE, 'weight_decay': 0.0},
     ]
-    optimizer = bnb.optim.AdamW8bit(optimizer_grouped_parameters, lr=learning_rate)  
+    optimizer = bnb.optim.AdamW8bit(optimizer_grouped_parameters, lr=LEARNING_RATE)  
     
-    warmup_steps = int(steps * OPTIMIZER_WARMUP)
-    scheduler = get_cosine_schedule_with_warmup(optimizer, num_warmup_steps=warmup_steps, num_training_steps=steps)
+    warmup_steps = int(STEPS * Config.optimizer_warmup)
+    scheduler = get_cosine_schedule_with_warmup(optimizer, num_warmup_steps=warmup_steps, num_training_steps=STEPS)
     
-    print(f"Loading VAE: {VAE_ID}...")
-    vae = AutoencoderKL.from_pretrained(VAE_ID).to(DEVICE)
+    print(f"Loading VAE: {Config.vae_id}...")
+    vae = AutoencoderKL.from_pretrained(Config.vae_id).to(DEVICE)
 
     def validate(step_count):
         model.eval()
         with torch.no_grad():
             torch_generator = torch.Generator(device=DEVICE).manual_seed(42)
-            initial_noise = torch.randn(1, 16, h // VAE_DOWNSAMPLE_FACTOR, w // VAE_DOWNSAMPLE_FACTOR, 
-                                        generator=torch_generator, device=DEVICE, dtype=DTYPE)
+            initial_noise = torch.randn(1, 16, h // Config.vae_downsample_factor, w // Config.vae_downsample_factor, 
+                                        generator=torch_generator, device=DEVICE, dtype=Config.dtype)
    
             uncond_embeds = torch.zeros_like(text)
             combined_text_embeds = torch.cat([uncond_embeds, text], dim=0)       
             x_euler = initial_noise.clone()
             x_rk4 = None
             
-            with torch.autocast(device_type=DEVICE, dtype=DTYPE):
-                x_euler = run_sampling_pipeline(model=model, initial_noise=x_euler, steps=sample_steps, 
+            with torch.autocast(device_type=DEVICE, dtype=Config.dtype):
+                x_euler = run_sampling_pipeline(model=model, initial_noise=x_euler, steps=SAMPLE_STEPS, 
                                                 combined_text_embeds=combined_text_embeds, cfg=1.0, 
-                                                sampler_type="euler", shift_val=SHIFT_VAL)
-                if enable_rk4:
-                    x_rk4 = run_sampling_pipeline(model=model, initial_noise=initial_noise.clone(), steps=sample_steps,
+                                                sampler_type="euler", shift_val=Config.shift_val)
+                if ENABLE_RK4:
+                    x_rk4 = run_sampling_pipeline(model=model, initial_noise=initial_noise.clone(), steps=SAMPLE_STEPS,
                                                   combined_text_embeds=combined_text_embeds, cfg=1.0, 
-                                                  sampler_type="rk4", shift_val=SHIFT_VAL)
+                                                  sampler_type="rk4", shift_val=Config.shift_val)
 
             img_pil_euler = decode_latents_to_image(vae_model=vae, latents=x_euler, device=DEVICE)
             img_list = [img_pil_euler]
             
-            if enable_rk4:
+            if ENABLE_RK4:
                 img_pil_rk4 = decode_latents_to_image(vae_model=vae, latents=x_rk4, device=DEVICE)
                 img_list.append(img_pil_rk4)
 
@@ -136,7 +132,7 @@ def sanity():
 
             label_y = label_height // 2
             
-            if enable_rk4:
+            if ENABLE_RK4:
                 half_w = w_total // 2
                 draw.text((half_w // 2, label_y), "Euler", fill=(255, 255, 255), font=font, anchor="mm")
                 draw.text((half_w + half_w // 2, label_y), "RK4", fill=(255, 255, 255), font=font, anchor="mm")
@@ -145,29 +141,30 @@ def sanity():
 
             filename = f"sanity_match_step_{step_count:04d}.png"
             canvas.save(filename)
-
+            wandb.log({"sanity_sample": wandb.Image(canvas)}, step=step_count)
+             
         model.train()
         
-    print(f"Starting Overfit (Shift={SHIFT_VAL}, SelfEval={USE_SELF_EVAL})...")
-    pbar = tqdm(range(steps))
+    print(f"Starting Overfit (Shift={Config.shift_val}, SelfEval={USE_SELF_EVAL})...")
+    pbar = tqdm(range(STEPS))
     
     for step in pbar:        
         batch_data = {
             "latents": latents, 
             "text_embeds": text 
         }
-        x_t, t, x_1, target, text_for_model = prepare_batch_and_targets(batch_data, DEVICE, DTYPE, SHIFT_VAL, OFFSET_NOISE)
+        x_t, t, x_1, target, text_for_model = prepare_batch_and_targets(batch_data, DEVICE, Config.dtype, Config.shift_val, Config.offset_noise)
         
-        with torch.autocast(device_type=DEVICE, dtype=DTYPE):
-            if USE_SELF_EVAL and step > (steps * START_SELF_EVAL_AT):
+        with torch.autocast(device_type=DEVICE, dtype=Config.dtype):
+            if USE_SELF_EVAL and step > (STEPS * Config.start_self_eval_at):
                  with torch.no_grad():
-                    loss = calculate_total_loss(model, ema_model, x_t, t, x_1, target, text_for_model, step, steps,
-                                                USE_SELF_EVAL, START_SELF_EVAL_AT, SELF_EVAL_LAMBDA, FAL_LAMBDA, 
-                                                FCL_LAMBDA, LOSS_TYPE, 1)
+                    loss = calculate_total_loss(model, ema_model, x_t, t, x_1, target, text_for_model, step, STEPS,
+                                                USE_SELF_EVAL, Config.start_self_eval_at, Config.self_eval_lambda, Config.fal_lambda, 
+                                                Config.fcl_lambda, Config.loss_type, 1)
             else:
-                loss = calculate_total_loss(model, ema_model, x_t, t, x_1, target, text_for_model, step, steps, 
-                                            USE_SELF_EVAL, START_SELF_EVAL_AT, SELF_EVAL_LAMBDA, FAL_LAMBDA, 
-                                            FCL_LAMBDA, LOSS_TYPE, 1)
+                loss = calculate_total_loss(model, ema_model, x_t, t, x_1, target, text_for_model, step, STEPS, 
+                                            USE_SELF_EVAL, Config.start_self_eval_at, Config.self_eval_lambda, Config.fal_lambda, 
+                                            Config.fcl_lambda, Config.loss_type, 1)
                 
         optimizer.zero_grad()
         loss.backward()
@@ -177,11 +174,21 @@ def sanity():
         
         lr_current = optimizer.param_groups[0]['lr']
         avg_gate, min_gate, max_gate = get_gate_stats(model) 
-        self_eval_status = "On" if USE_SELF_EVAL and step > (steps * START_SELF_EVAL_AT) else "Off"     
+        self_eval_status = "On" if USE_SELF_EVAL and step > (STEPS * Config.start_self_eval_at) else "Off"     
+        
+        wandb.log({"loss": loss.item(),
+                   "lr": lr_current,
+                   "gate_avg": avg_gate,
+                   "gate_min": min_gate,
+                   "gate_max": max_gate}, 
+                  step=step)
+        
         pbar.set_description(f"Step {step}|Loss: {loss.item():.3f}|LR: {lr_current:.6f}|Gate(avg-min-max): {avg_gate:.3f}[{min_gate:.3f}/{max_gate:.3f}]|Self-E: {self_eval_status}|")
                 
-        if step > 0 and (step % sample_every == 0 or step == steps - 1):
+        if step > 0 and (step % SAMPLE_EVERY == 0 or step == STEPS - 1):
             validate(step)
+            
+    wandb.finish()
 
 if __name__ == "__main__":
     start_time = time.time()

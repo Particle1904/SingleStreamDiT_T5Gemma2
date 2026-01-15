@@ -19,6 +19,7 @@ class Config:
     # REGION: PROJECT & PATHS
     # General experiment metadata and filesystem layout
     # ============================================================
+    seed = 42
     is_kaggle = os.path.exists("/kaggle/working")
     
     if is_kaggle:
@@ -40,7 +41,7 @@ class Config:
     # Set to None for a fresh run
     resume_from = None
     # Reset optimizer when resume training
-    reset_optmizer = True
+    reset_optimizer = True
         
     # ============================================================
     # REGION: MODEL ARCHITECTURE
@@ -104,7 +105,7 @@ class Config:
     # 1e-4 or 2e-4 for fresh/aggressive and 4e-5 or 5e-5 for fine-tuning
     learning_rate = 2e-4   
     # Total number of epochs (from scratch or resumed)
-    epochs = 1500
+    epochs = 1200
     # Effective batch size per optimizer step
     batch_size = 12
     accum_steps = 1
@@ -167,11 +168,12 @@ class Config:
     device = _accelerator.device
     # Cache entire dataset in RAM (recommended for <= ~20k images)
     load_entire_dataset = True
-    num_workers = 4 if os.name != 'nt' else 0
+    num_workers = 2 if os.name != 'nt' else 0
     
     # ============================================================
     # REGION: LOGGING & VALIDATION
     # ============================================================
+    run_validation_loss = True 
     save_every = 100
     validate_every = 50
     # Validation sampling parameters

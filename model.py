@@ -50,13 +50,13 @@ class FourierFilter(nn.Module):
     def __init__(self, dim, hidden_dim=64):
         super().__init__()
         self.low_mlp = nn.Sequential(
-            nn.Linear(1, hidden_dim, bias=False),
+            nn.Linear(2, hidden_dim, bias=False),
             nn.SiLU(),
             nn.Linear(hidden_dim, dim * 2, bias=False)
         )
 
         self.high_mlp = nn.Sequential(
-            nn.Linear(1, hidden_dim, bias=False),
+            nn.Linear(2, hidden_dim, bias=False),
             nn.SiLU(),
             nn.Linear(hidden_dim, dim * 2, bias=False)
         )
@@ -74,12 +74,13 @@ class FourierFilter(nn.Module):
     
     @staticmethod
     @lru_cache(maxsize=32)
-    def get_normalized_radius(h, w, device):
+    def get_frequency_coords(h, w, device):
         fy = torch.fft.fftfreq(h, device=device)
         fx = torch.fft.rfftfreq(w, device=device)
         gy, gx = torch.meshgrid(fy, fx, indexing='ij')
-        r = torch.sqrt(gx**2 + gy**2) / 0.70710678
-        return r
+        
+        coords = torch.stack([gy, gx], dim=-1)
+        return coords
 
     def forward(self, x, h, w):
         B, L, C = x.shape
@@ -90,34 +91,48 @@ class FourierFilter(nn.Module):
         
         h_freq, w_freq = x_fft.shape[1], x_fft.shape[2]
         
-        r = self.get_normalized_radius(h, w, x.device)
-        r_flat = r.reshape(-1, 1).to(dtype)
-
-        raw_low = self.low_mlp(r_flat)   
-        raw_high = self.high_mlp(r_flat) 
+        # 1. Get Coordinates (Y, X)
+        coords = self.get_frequency_coords(h, w, x.device) 
+        coords_flat = coords.reshape(-1, 2).to(dtype)
         
+        # 2. Anisotropic MLP: Learn features based on Direction (Y, X)
+        raw_low = self.low_mlp(coords_flat)   
+        raw_high = self.high_mlp(coords_flat) 
+        
+        # 3. Calculate Radius purely for the Cutoff Mask (Curriculum)
+        r_flat = torch.norm(coords_flat, p=2, dim=-1, keepdim=True)
+        r_flat = r_flat / 0.70710678
+
+        # 4. Polar Math (Amplitude + Phase)
         amp_log_low, phase_low = raw_low.chunk(2, dim=-1)
         amp_log_high, phase_high = raw_high.chunk(2, dim=-1)
 
         cutoff = torch.sigmoid(self.raw_cutoff)
         scale = F.softplus(self.raw_scale)
+        
+        # 5. Mask determines if we use the "Low Freq" or "High Freq" MLP output
         mask = torch.sigmoid((cutoff - r_flat) * scale)
         
         amp_log = mask * amp_log_low + (1.0 - mask) * amp_log_high
         phase_shift = mask * phase_low + (1.0 - mask) * phase_high
 
+        # 6. Convert log-amplitude to gain
         amp_gain = torch.exp(torch.tanh(amp_log))
         
+        # 7. Convert 0-1 phase output to 0-Pi phase shift
         phase_shift = phase_shift * torch.pi 
 
+        # 8. Polar to Cartesian for complex multiplication
         filter_real = amp_gain * torch.cos(phase_shift)
         filter_imag = amp_gain * torch.sin(phase_shift)
         
         complex_filter = torch.complex(filter_real, filter_imag)
         final_gain = complex_filter.view(h_freq, w_freq, C)
 
+        # 9. Apply filter
         x_fft_filtered = x_fft * final_gain.unsqueeze(0)
         
+        # 10. Inverse FFT
         x_out = torch.fft.irfft2(x_fft_filtered, s=(h, w), dim=(1, 2), norm='ortho')
         
         return x_out.reshape(B, L, C).to(dtype) * torch.tanh(self.gate)
