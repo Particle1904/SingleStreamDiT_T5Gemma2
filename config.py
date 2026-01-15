@@ -1,9 +1,10 @@
 import os
 import torch
 from accelerate.utils import set_seed
-from accelerate import Accelerator
+from accelerate import Accelerator, DistributedDataParallelKwargs
 
-_accelerator = Accelerator()
+ddp_kwargs = DistributedDataParallelKwargs(find_unused_parameters=True)
+_accelerator = Accelerator(log_with="wandb", kwargs_handlers=[ddp_kwargs])
 set_seed(42)
 
 class Config:
@@ -152,7 +153,8 @@ class Config:
     # REGION: OPTIMIZATION & PRECISION
     # Runtime and numerical behavior
     # ============================================================
-    dtype = torch.bfloat16
+    dtype = torch.float32
+
     gradient_checkpointing = True
     # Exponential Moving Average for inference stability
     use_ema = True

@@ -20,15 +20,8 @@ class RMSNorm(nn.Module):
 class LocalSpatialBias(nn.Module):
     def __init__(self, dim):
         super().__init__()
-        self.conv = nn.Conv2d(
-            dim, dim, 
-            kernel_size=3, 
-            padding=1, 
-            groups=dim, 
-            bias=True
-        )
+        self.conv = nn.Conv2d(dim, dim, kernel_size=3, padding=1, groups=dim, bias=False)
         nn.init.constant_(self.conv.weight, 1e-3)
-        nn.init.constant_(self.conv.bias, 0)
 
     def forward(self, x, h, w):
         B, L, C = x.shape
@@ -110,7 +103,6 @@ class FourierFilter(nn.Module):
         final_gain_imag_flat = mask * gain_low_imag + (1.0 - mask) * gain_high_imag
         
         final_gain_complex_flat = torch.complex(final_gain_real_flat.float(), final_gain_imag_flat.float())        
-        
         final_gain = final_gain_complex_flat.view(h_freq, w_freq, C)
 
         x_fft_filtered = x_fft * final_gain.unsqueeze(0)

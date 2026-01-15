@@ -18,8 +18,12 @@ from dataset import TextImageDataset, BucketBatchSampler
 from latents import decode_latents_to_image
 from samplers import run_sampling_pipeline
 from losses import calculate_total_loss, prepare_batch_and_targets
-from accelerate import Accelerator
 import wandb
+import builtins
+
+if not Config.accelerator.is_main_process:
+    def print_pass(*args, **kwargs): pass
+    builtins.print = print_pass
 
 # PATHS
 CACHE_DIR = Config.cache_dir
@@ -196,14 +200,12 @@ def validate(accelerator, model, vae, epoch, global_step, is_ema=False):
 def train():
     accelerator = Config.accelerator
     if accelerator.is_main_process:
-        accelerator.init_trackers(project_name=PROJECT_NAME,
-            config={k: v for k, v in Config.__dict__.items() if not k.startswith("__")}
-        )
-    
-    if accelerator.is_main_process:
         setup_dirs()
+        accelerator.init_trackers(project_name=PROJECT_NAME,
+            config={k: v for k, v in Config.__dict__.items() if not k.startswith("__")})
+        
     print(f"Loading DiT...")
-    model = SingleStreamDiT(in_channels=IN_CHANNELS, gradient_checkpointing=GRADIENT_CHECKPOINTING).to(DEVICE, dtype=DTYPE)    
+    model = SingleStreamDiT(in_channels=IN_CHANNELS, gradient_checkpointing=GRADIENT_CHECKPOINTING).to(DEVICE)    
     
     print("Checking if Linux for torch.compile...")
     if sys.platform.startswith('linux'):
@@ -335,9 +337,11 @@ def train():
                     pbar.set_description(f"Ep {epoch}|Loss: {current_loss:.3f}|LR: {lr_current:.6f}|Gate(avg-min-max): {avg_gate:.3f}[{min_gate:.3f}/{max_gate:.3f}]|Self-E: {self_eval_status}|")
                     logger.log(epoch, global_step, current_loss, lr_current, avg_gate, min_gate, max_gate)
                     accelerator.log({"train_loss": current_loss, 
-                                     "lr": optimizer.param_groups[0]['lr'], 
-                                     "gate_avg": avg_gate}, 
-                                     step=global_step)
+                                     "lr": lr_current, 
+                                     "gate_avg": avg_gate,
+                                     "gate_min": min_gate,
+                                     "gate_max": max_gate},
+                                    step=global_step)
 
         if epoch > 0 and epoch % VALIDATE_EVERY == 0:
             validate(accelerator, model, vae, epoch, global_step, is_ema=False)
@@ -375,8 +379,6 @@ def train():
         }
         torch.save(save_data, f"{CHECKPOINT_DIR}/full_state_final.pt")
         torch.save(ema_model.module.state_dict(), f"{CHECKPOINT_DIR}/ema_weights_final.pt")
-        
-        # End the WandB run gracefully
         accelerator.end_training()
     
 if __name__ == "__main__":

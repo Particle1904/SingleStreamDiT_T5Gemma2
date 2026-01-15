@@ -24,7 +24,7 @@ class TextImageDataset(Dataset):
         self.buckets = {}
         
         print(f"Indexing {len(self.files)} files (RAM Cache: {LOAD_ENTIRE_DATASET})...")
-        for idx, f in enumerate(tqdm(self.files, desc="Loading Dataset")):
+        for idx, f in enumerate(tqdm(self.files, desc="Loading Dataset", disable=not Config.accelerator.is_main_process)):
             try:
                 d = torch.load(f, map_location="cpu")
                 
