@@ -173,7 +173,7 @@ class Config:
     # REGION: LOGGING & VALIDATION
     # ============================================================
     save_every = 100
-    validate_every = 25
+    validate_every = 50
     # Validation sampling parameters
     validate_cfg = 3.00
     validate_steps = 30 

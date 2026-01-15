@@ -194,7 +194,7 @@ def validate(accelerator, model, vae, epoch, global_step, is_ema=False):
             {"validation_sample": wandb.Image(image)}, step=global_step
         )
         save_path = f"{SAMPLES_DIR}/{'EMA_' if is_ema else 'RAW_'}epoch_{epoch}.png"
-        Image.fromarray(image[0]).save(save_path)
+        image.save(save_path)
     model.train()
 
 def train():
@@ -336,8 +336,8 @@ def train():
                     self_eval_status = "On" if USE_SELF_EVAL and epoch > (EPOCHS * START_SELF_EVAL_AT) else "Off"
                     pbar.set_description(f"Ep {epoch}|Loss: {current_loss:.3f}|LR: {lr_current:.6f}|Gate(avg-min-max): {avg_gate:.3f}[{min_gate:.3f}/{max_gate:.3f}]|Self-E: {self_eval_status}|")
                     logger.log(epoch, global_step, current_loss, lr_current, avg_gate, min_gate, max_gate)
-                    accelerator.log({"train_loss": current_loss, 
-                                     "lr": lr_current, 
+                    accelerator.log({"train_loss": current_loss,
+                                     "learning_rate": lr_current, 
                                      "gate_avg": avg_gate,
                                      "gate_min": min_gate,
                                      "gate_max": max_gate},

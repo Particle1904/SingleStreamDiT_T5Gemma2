@@ -27,11 +27,12 @@ def prepare_latents_for_decode(latents: torch.Tensor, clamp=False, print_debug=F
         print(f"Latents after torch.clamp Min: {latents.min().item():.2f}, Max: {latents.max().item():.2f}")
     return latents
 
-def decode_latents_to_image(vae_model, latents: torch.Tensor, device: str) -> Image.Image:
+def decode_latents_to_image(vae_model, latents: torch.Tensor, device) -> Image.Image:
     latents = prepare_latents_for_decode(latents)
 
     with torch.no_grad():
-        with torch.autocast(device, enabled=False): 
+        device_type = device.type if isinstance(device, torch.device) else device
+        with torch.autocast(device_type, enabled=False): 
             image_tensor = vae_model.decode(latents.float()).sample
 
     image_tensor = (image_tensor / 2 + 0.5).clamp(0, 1)
