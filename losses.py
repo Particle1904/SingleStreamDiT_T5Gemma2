@@ -32,11 +32,13 @@ def get_fourier_amplitude_loss(x_hat_1: torch.Tensor, x_1: torch.Tensor, t: torc
                                fal_lambda: float = 0.05) -> torch.Tensor:
     fal_curriculum_mask = (t > 0.5).view(-1, 1, 1, 1)
 
+    time_weight = t.view(-1, 1, 1, 1) ** 2 
+
     x_hat_fft = torch.fft.rfft2(x_hat_1.float(), dim=(-2, -1), norm='ortho')
     x_true_fft = torch.fft.rfft2(x_1.float(), dim=(-2, -1), norm='ortho')
     
     loss_fal_raw = F.mse_loss(torch.abs(x_hat_fft), torch.abs(x_true_fft), reduction='none')    
-    loss_fal = (loss_fal_raw * fal_curriculum_mask).mean()
+    loss_fal = (loss_fal_raw * fal_curriculum_mask * time_weight).mean()
     
     return fal_lambda * loss_fal
 
