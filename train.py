@@ -5,7 +5,6 @@ import time
 import re
 import glob
 import csv
-import torch.nn.functional as F
 import bitsandbytes as bnb
 from torch.utils.data import DataLoader
 from tqdm import tqdm
@@ -18,7 +17,7 @@ from config import Config
 from dataset import TextImageDataset, BucketBatchSampler
 from latents import decode_latents_to_image
 from samplers import run_sampling_pipeline
-from losses import calculate_total_loss, get_1d_shifted_time, get_base_loss, get_fourier_amplitude_loss, get_self_eval_loss, predict_x1_from_velocity, prepare_batch_and_targets
+from losses import calculate_total_loss, prepare_batch_and_targets
 
 # PATHS
 CACHE_DIR = Config.cache_dir
