@@ -326,8 +326,6 @@ def train():
             
             with accelerator.autocast():
                 if self_eval_active:
-                    # If Self-Eval is ON, the EMA forward pass must be wrapped in torch.no_grad()                    
-                    with torch.no_grad():
                         loss = calculate_total_loss(
                             model, ema_model, x_t, t, x_1, target, text, epoch, Config.epochs, Config.use_self_eval,
                             Config.start_self_eval_at, Config.self_eval_lambda, Config.fal_lambda, Config.fcl_lambda, Config.loss_type, 
