@@ -44,7 +44,7 @@ class RMSNorm(nn.Module):
 class LocalSpatialBias(nn.Module):
     def __init__(self, dim):
         super().__init__()
-        self.conv = nn.Conv2d(dim, dim, kernel_size=3, padding=1, groups=dim, bias=False)
+        self.conv = nn.Conv2d(dim, dim, kernel_size=3, padding=1, padding_mode='reflect', groups=dim, bias=False)
         nn.init.constant_(self.conv.weight, 1e-3)
 
     def forward(self, x, h, w):
@@ -71,44 +71,98 @@ class SwiGLU(nn.Module):
         return self.w3(F.silu(self.w1(x)) * self.w2(x))
 
 class FourierFilter(nn.Module):
-    def __init__(self, dim, h_max=128, w_max=128):
+    def __init__(self, dim, hidden_dim=64):
         super().__init__()
-        self.dim = dim
-        self.w_dim = w_max // 2 + 1 
-        self.h_dim = h_max
-        
-        self.complex_weight = nn.Parameter(
-            torch.randn(1, dim, self.h_dim, self.w_dim, 2, dtype=torch.float32) * 0.02
+        self.low_mlp = nn.Sequential(
+            nn.Linear(2, hidden_dim, bias=False),
+            nn.SiLU(),
+            nn.Linear(hidden_dim, dim * 2, bias=False)
         )
+        self.high_mlp = nn.Sequential(
+            nn.Linear(2, hidden_dim, bias=False),
+            nn.SiLU(),
+            nn.Linear(hidden_dim, dim * 2, bias=False)
+        )
+        self.raw_cutoff = nn.Parameter(torch.tensor(-1.0))
+        self.raw_scale = nn.Parameter(torch.tensor(3.0))
+        self.gate = nn.Parameter(torch.tensor([0.01]))
         
-        self.gate = nn.Parameter(torch.zeros(1))
+        nn.init.xavier_uniform_(self.low_mlp[-1].weight, gain=0.1)
+        nn.init.xavier_uniform_(self.high_mlp[-1].weight, gain=0.1)
+        nn.init.normal_(self.low_mlp[0].weight, std=0.02)
+        nn.init.normal_(self.high_mlp[0].weight, std=0.02)
+
+    @staticmethod
+    @lru_cache(maxsize=32)
+    def get_frequency_coords(h, w, device):
+        fy = torch.fft.fftfreq(h, device=device)
+        fx = torch.fft.rfftfreq(w, device=device)
+        gy, gx = torch.meshgrid(fy, fx, indexing='ij')
+        coords = torch.stack([gy, gx], dim=-1)
+        return coords
 
     def forward(self, x, h, w):
         B, L, C = x.shape
         dtype = x.dtype
+        device = x.device
         
-        # 1. FFT
-        x_img = x.view(B, h, w, C).float()
-        x_fft = torch.fft.rfft2(x_img, dim=(1, 2), norm='ortho')
+        # 1. Reshape
+        x_img = x.view(B, h, w, C).permute(0, 3, 1, 2).float()
         
-        target_h, target_w_freq = x_fft.shape[1], x_fft.shape[2]
+        # 2. Reflection Padding
+        pad = 2 
+        x_padded = F.pad(x_img, (pad, pad, pad, pad), mode='reflect')
+        h_pad, w_pad = h + (2 * pad), w + (2 * pad)
         
-        # 2. Dynamic Resolution Handling
-        weight_in = self.complex_weight.permute(0, 1, 4, 2, 3).reshape(1, C * 2, self.h_dim, self.w_dim)
-        weight_interpolated = F.interpolate(weight_in, size=(target_h, target_w_freq), mode='bilinear', 
-                                            align_corners=False)
-        weight_interpolated = weight_interpolated.view(1, C, 2, target_h, target_w_freq)
-        weight_interpolated = weight_interpolated.permute(0, 3, 4, 1, 2)
-        weight_complex = torch.view_as_complex(weight_interpolated.contiguous())
+        # 3. Forward to Frequency Domain
+        x_fft = torch.fft.rfft2(x_padded, dim=(2, 3), norm='ortho')
+        h_freq, w_freq = x_fft.shape[2], x_fft.shape[3]
         
-        # 3. Apply Filter
-        x_fft_filtered = x_fft * weight_complex
+        # 4. Get Coordinates
+        coords = self.get_frequency_coords(h_pad, w_pad, device) 
+        coords_flat = coords.reshape(-1, 2).to(dtype)
         
-        # 4. Inverse FFT
-        x_out = torch.fft.irfft2(x_fft_filtered, s=(h, w), dim=(1, 2), norm='ortho')
+        # 5. Anisotropic MLP
+        raw_low = self.low_mlp(coords_flat)   
+        raw_high = self.high_mlp(coords_flat) 
         
-        # 5. Residual Connection with Gate
-        return x_out.reshape(B, L, C).to(dtype) * torch.tanh(self.gate)
+        # 6. Calculate Radius for Curriculum Mask
+        r_flat = torch.norm(coords_flat, p=2, dim=-1, keepdim=True)
+        r_flat = r_flat / 0.70710678
+        
+        # 7. Polar Math (Amplitude + Phase)
+        amp_log_low, phase_low = raw_low.chunk(2, dim=-1)
+        amp_log_high, phase_high = raw_high.chunk(2, dim=-1)
+        
+        cutoff = torch.sigmoid(self.raw_cutoff)
+        scale = F.softplus(self.raw_scale)
+        
+        mask = torch.sigmoid((cutoff - r_flat) * scale)
+        amp_log = mask * amp_log_low + (1.0 - mask) * amp_log_high
+        phase_shift = mask * phase_low + (1.0 - mask) * phase_high
+        
+        # 8. Convert to Complex Filter Gain
+        amp_gain = torch.exp(torch.tanh(amp_log))
+        phase_shift = phase_shift * torch.pi 
+        
+        filter_real = amp_gain * torch.cos(phase_shift)
+        filter_imag = amp_gain * torch.sin(phase_shift)
+        complex_filter = torch.complex(filter_real, filter_imag)
+        
+        final_gain = complex_filter.view(h_freq, w_freq, C).permute(2, 0, 1).unsqueeze(0)
+        
+        # 9. Apply Filter in Frequency Domain
+        x_fft_filtered = x_fft * final_gain
+        
+        # 10. Inverse FFT
+        x_out = torch.fft.irfft2(x_fft_filtered, s=(h_pad, w_pad), dim=(2, 3), norm='ortho')
+        
+        # 11. Crop and Cleanup
+        x_out = x_out[:, :, pad:-pad, pad:-pad]
+        x_out = x_out.permute(0, 2, 3, 1).reshape(B, L, C)
+        
+        # 12. Gating
+        return x_out.to(dtype) * torch.tanh(self.gate)
 
 class VisualFusionBlock(nn.Module):
     def __init__(self, hidden_size, num_heads, dropout=0.0, use_fourier=True):
@@ -132,7 +186,6 @@ class VisualFusionBlock(nn.Module):
         self.use_fourier = use_fourier
         if self.use_fourier:
             self.fourier_filter = FourierFilter(hidden_size)
-            self.fourier_norm = RMSNorm(hidden_size)
         
         self.adaLN_modulation = nn.Sequential(
             nn.SiLU(), 
@@ -179,23 +232,20 @@ class VisualFusionBlock(nn.Module):
         if img_h is not None and img_w is not None:
             context_part = x[:, :-img_len, :]
             img_part = x[:, -img_len:, :]
-            
             img_part = img_part + self.local_bias(img_part, img_h, img_w)
             x = torch.cat([context_part, img_part], dim=1)
         
         x_norm_ffn = self.ffn_norm1(x)
         x_modulated_ffn = x_norm_ffn * (1 + scale_mlp.unsqueeze(1)) + shift_mlp.unsqueeze(1)
-        
         ffn_out = self.feed_forward(x_modulated_ffn)
-        
+
         if self.use_fourier and img_h is not None and img_w is not None:
-            img_tokens = x_modulated_ffn[:, img_start_idx:, :]
-            fourier_input = self.fourier_norm(img_tokens)
-            fourier_out = self.fourier_filter(fourier_input, img_h, img_w)
+            img_tokens_for_fourier = x_modulated_ffn[:, img_start_idx:, :]
+            fourier_res = self.fourier_filter(img_tokens_for_fourier, img_h, img_w)
+            ffn_out[:, img_start_idx:, :] = ffn_out[:, img_start_idx:, :] + fourier_res
 
-            ffn_out[:, img_start_idx:, :] += fourier_out
-
-        x = x + gate_mlp.unsqueeze(1) * self.dropout(ffn_out)        
+        x = x + gate_mlp.unsqueeze(1) * self.dropout(ffn_out)
+        
         return x
 
 class ContextRefinerBlock(nn.Module):
@@ -248,7 +298,7 @@ class SingleStreamDiT(nn.Module):
         self.in_channels = in_channels
         self.hidden_size = hidden_size
         self.fourier_stack_depth = fourier_stack_depth
-        self.use_fourier_in_refiner= use_fourier_in_refiner
+        self.use_fourier_in_refiner = use_fourier_in_refiner
         
         patch_dim = in_channels * (patch_size ** 2)
         
@@ -415,14 +465,3 @@ class SingleStreamDiT(nn.Module):
         for block in self.blocks:
             nn.init.constant_(block.adaLN_modulation[-1].weight, 0)
             nn.init.constant_(block.adaLN_modulation[-1].bias, 0)
-        
-        final_filter_modules = []
-        for block in self.final_fourier_blocks:
-            final_filter_modules.append(block['filter'])
-        
-        for module in self.modules():
-            if isinstance(module, FourierFilter):
-                if module in final_filter_modules:
-                    nn.init.constant_(module.gate, 0.2) 
-                else:
-                    nn.init.constant_(module.gate, 0.4)

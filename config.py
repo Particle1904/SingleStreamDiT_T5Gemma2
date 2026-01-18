@@ -149,7 +149,7 @@ class Config:
     # ============================================================
     fcl_lambda = 0.1
     # Set to false to disable the 2 fourier filters in refiner layers
-    use_fourier_filters_in_refiner = False 
+    use_fourier_filters_in_refiner = True 
     # Set to 0 to disable the final stack
     fourier_stack_depth = 2
     # ============================================================
