@@ -158,7 +158,7 @@ class FourierFilter(nn.Module):
         x_out = torch.fft.irfft2(x_fft_filtered, s=(h_pad, w_pad), dim=(2, 3), norm='ortho')
         
         # 11. Crop and Cleanup
-        x_out = x_out[:, :, pad:-pad, pad:-pad]
+        x_out = x_out[:, :, pad:pad+h, pad:pad+w]
         x_out = x_out.permute(0, 2, 3, 1).reshape(B, L, C)
         
         # 12. Gating
@@ -239,12 +239,14 @@ class VisualFusionBlock(nn.Module):
         x_modulated_ffn = x_norm_ffn * (1 + scale_mlp.unsqueeze(1)) + shift_mlp.unsqueeze(1)
         ffn_out = self.feed_forward(x_modulated_ffn)
 
+        x = x + gate_mlp.unsqueeze(1) * self.dropout(ffn_out)
+
         if self.use_fourier and img_h is not None and img_w is not None:
             img_tokens_for_fourier = x_modulated_ffn[:, img_start_idx:, :]
             fourier_res = self.fourier_filter(img_tokens_for_fourier, img_h, img_w)
-            ffn_out[:, img_start_idx:, :] = ffn_out[:, img_start_idx:, :] + fourier_res
-
-        x = x + gate_mlp.unsqueeze(1) * self.dropout(ffn_out)
+            context_part = x[:, :img_start_idx, :]
+            img_part = x[:, img_start_idx:, :] + fourier_res
+            x = torch.cat([context_part, img_part], dim=1)
         
         return x
 
@@ -322,7 +324,7 @@ class SingleStreamDiT(nn.Module):
         self.final_fourier_blocks = nn.ModuleList()
     
         if self.fourier_stack_depth > 0:
-            for _ in range(2):
+            for _ in range(fourier_stack_depth):
                 block = nn.ModuleDict({
                     'norm': RMSNorm(hidden_size),
                     'filter': FourierFilter(hidden_size)

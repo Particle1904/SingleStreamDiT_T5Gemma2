@@ -93,7 +93,25 @@ def process():
             
             bucket_counts[(bw, bh)] += 1
             
-            img = transforms.Resize((bh, bw), interpolation=transforms.InterpolationMode.LANCZOS)(image)
+            target_aspect = bw / bh
+            img_aspect = w / h
+
+            if img_aspect > target_aspect:
+                resize_h = bh
+                resize_w = int(bh * img_aspect)
+            else:
+                resize_w = bw
+                resize_h = int(bw / img_aspect)
+            
+            img = image.resize((resize_w, resize_h), resample=Image.LANCZOS)
+            
+            left = (resize_w - bw) // 2
+            top = (resize_h - bh) // 2
+            right = left + bw
+            bottom = top + bh
+            
+            img = img.crop((left, top, right, bottom))
+            
             img_tensor = TF.to_tensor(img).unsqueeze(0).to(Config.device)
             img_tensor = TF.normalize(img_tensor, [0.5], [0.5])
 
