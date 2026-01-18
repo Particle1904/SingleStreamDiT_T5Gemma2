@@ -107,8 +107,8 @@ class Config:
     # Total number of epochs (from scratch or resumed)
     epochs = 1200
     # Effective batch size per optimizer step
-    batch_size = 12
-    accum_steps = 1
+    batch_size = 16
+    accum_steps = 2
     # Loss for velocity prediction
     # Options: "mse", "l1", "huber"
     loss_type = "mse"
@@ -134,7 +134,7 @@ class Config:
     # Teacher–student consistency regularization
     # ============================================================
     # Enable Self-Evaluation (recommended OFF for initial training)
-    use_self_eval = True
+    use_self_eval = False
     # Fraction of total epochs before Self-Evaluation activates
     start_self_eval_at = 0.85
     # Strength of self-evaluation loss
@@ -143,13 +143,13 @@ class Config:
     # ============================================================
     # REGION:  Fourier Amplitude Loss
     # ============================================================
-    fal_lambda = 0.05
+    fal_lambda = 0.5
     # ============================================================
     # REGION:  Fourier Correlation Loss
     # ============================================================
-    fcl_lambda = 0.05
+    fcl_lambda = 0.1
     # Set to false to disable the 2 fourier filters in refiner layers
-    use_fourier_filters_in_refiner = True  
+    use_fourier_filters_in_refiner = False 
     # Set to 0 to disable the final stack
     fourier_stack_depth = 2
     # ============================================================
@@ -158,7 +158,7 @@ class Config:
     # ============================================================
     dtype = torch.float32
 
-    gradient_checkpointing = True
+    gradient_checkpointing = False
     # Exponential Moving Average for inference stability
     use_ema = True
     ema_decay = 0.999

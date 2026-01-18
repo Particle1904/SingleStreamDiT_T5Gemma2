@@ -71,94 +71,43 @@ class SwiGLU(nn.Module):
         return self.w3(F.silu(self.w1(x)) * self.w2(x))
 
 class FourierFilter(nn.Module):
-    def __init__(self, dim, hidden_dim=64):
+    def __init__(self, dim, h_max=128, w_max=128):
         super().__init__()
-        self.low_mlp = nn.Sequential(
-            nn.Linear(2, hidden_dim, bias=False),
-            nn.SiLU(),
-            nn.Linear(hidden_dim, dim * 2, bias=False)
+        self.dim = dim
+        self.w_dim = w_max // 2 + 1 
+        self.h_dim = h_max
+        
+        self.complex_weight = nn.Parameter(
+            torch.randn(1, dim, self.h_dim, self.w_dim, 2, dtype=torch.float32) * 0.02
         )
-
-        self.high_mlp = nn.Sequential(
-            nn.Linear(2, hidden_dim, bias=False),
-            nn.SiLU(),
-            nn.Linear(hidden_dim, dim * 2, bias=False)
-        )
-
-        self.raw_cutoff = nn.Parameter(torch.tensor(-1.0))
-        self.raw_scale = nn.Parameter(torch.tensor(3.0))
         
-        self.gate = nn.Parameter(torch.ones(1) * 0.25)
-
-        nn.init.constant_(self.low_mlp[-1].weight, 0)
-        nn.init.constant_(self.high_mlp[-1].weight, 0)
-        
-        nn.init.normal_(self.low_mlp[0].weight, std=0.02)
-        nn.init.normal_(self.high_mlp[0].weight, std=0.02)
-    
-    @staticmethod
-    @lru_cache(maxsize=32)
-    def get_frequency_coords(h, w, device):
-        fy = torch.fft.fftfreq(h, device=device)
-        fx = torch.fft.rfftfreq(w, device=device)
-        gy, gx = torch.meshgrid(fy, fx, indexing='ij')
-        
-        coords = torch.stack([gy, gx], dim=-1)
-        return coords
+        self.gate = nn.Parameter(torch.zeros(1))
 
     def forward(self, x, h, w):
         B, L, C = x.shape
         dtype = x.dtype
-
+        
+        # 1. FFT
         x_img = x.view(B, h, w, C).float()
         x_fft = torch.fft.rfft2(x_img, dim=(1, 2), norm='ortho')
         
-        h_freq, w_freq = x_fft.shape[1], x_fft.shape[2]
+        target_h, target_w_freq = x_fft.shape[1], x_fft.shape[2]
         
-        # 1. Get Coordinates (Y, X)
-        coords = self.get_frequency_coords(h, w, x.device) 
-        coords_flat = coords.reshape(-1, 2).to(dtype)
+        # 2. Dynamic Resolution Handling
+        weight_in = self.complex_weight.permute(0, 1, 4, 2, 3).reshape(1, C * 2, self.h_dim, self.w_dim)
+        weight_interpolated = F.interpolate(weight_in, size=(target_h, target_w_freq), mode='bilinear', 
+                                            align_corners=False)
+        weight_interpolated = weight_interpolated.view(1, C, 2, target_h, target_w_freq)
+        weight_interpolated = weight_interpolated.permute(0, 3, 4, 1, 2)
+        weight_complex = torch.view_as_complex(weight_interpolated.contiguous())
         
-        # 2. Anisotropic MLP: Learn features based on Direction (Y, X)
-        raw_low = self.low_mlp(coords_flat)   
-        raw_high = self.high_mlp(coords_flat) 
+        # 3. Apply Filter
+        x_fft_filtered = x_fft * weight_complex
         
-        # 3. Calculate Radius purely for the Cutoff Mask (Curriculum)
-        r_flat = torch.norm(coords_flat, p=2, dim=-1, keepdim=True)
-        r_flat = r_flat / 0.70710678
-
-        # 4. Polar Math (Amplitude + Phase)
-        amp_log_low, phase_low = raw_low.chunk(2, dim=-1)
-        amp_log_high, phase_high = raw_high.chunk(2, dim=-1)
-
-        cutoff = torch.sigmoid(self.raw_cutoff)
-        scale = F.softplus(self.raw_scale)
-        
-        # 5. Mask determines if we use the "Low Freq" or "High Freq" MLP output
-        mask = torch.sigmoid((cutoff - r_flat) * scale)
-        
-        amp_log = mask * amp_log_low + (1.0 - mask) * amp_log_high
-        phase_shift = mask * phase_low + (1.0 - mask) * phase_high
-
-        # 6. Convert log-amplitude to gain
-        amp_gain = torch.exp(torch.tanh(amp_log))
-        
-        # 7. Convert 0-1 phase output to 0-Pi phase shift
-        phase_shift = phase_shift * torch.pi 
-
-        # 8. Polar to Cartesian for complex multiplication
-        filter_real = amp_gain * torch.cos(phase_shift)
-        filter_imag = amp_gain * torch.sin(phase_shift)
-        
-        complex_filter = torch.complex(filter_real, filter_imag)
-        final_gain = complex_filter.view(h_freq, w_freq, C)
-
-        # 9. Apply filter
-        x_fft_filtered = x_fft * final_gain.unsqueeze(0)
-        
-        # 10. Inverse FFT
+        # 4. Inverse FFT
         x_out = torch.fft.irfft2(x_fft_filtered, s=(h, w), dim=(1, 2), norm='ortho')
         
+        # 5. Residual Connection with Gate
         return x_out.reshape(B, L, C).to(dtype) * torch.tanh(self.gate)
 
 class VisualFusionBlock(nn.Module):
@@ -474,6 +423,6 @@ class SingleStreamDiT(nn.Module):
         for module in self.modules():
             if isinstance(module, FourierFilter):
                 if module in final_filter_modules:
-                    nn.init.constant_(module.gate, 0.3) 
+                    nn.init.constant_(module.gate, 0.2) 
                 else:
-                    nn.init.constant_(module.gate, 0.5)
+                    nn.init.constant_(module.gate, 0.4)
