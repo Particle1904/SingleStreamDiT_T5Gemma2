@@ -12,15 +12,9 @@ from config import Config
 
 def generate_buckets(target_res, stride=32):
     area = target_res * target_res
-    
     aspect_ratios = [
-        1.0,           # Square
-        1.333, 0.75,   # 4:3 & 3:4
-        1.5,   0.666,  # 3:2 & 2:3
-        1.777, 0.562,  # 16:9 & 9:16
-        2.0,   0.5     # 2:1 & 1:2 (Ultrawide/Tall)
+        1.0, 1.333, 0.75, 1.5, 0.666, 1.777, 0.562, 2.0, 0.5
     ]
-    
     if target_res <= 512:
         aspect_ratios = [1.0, 1.333, 0.75]
 
@@ -28,24 +22,12 @@ def generate_buckets(target_res, stride=32):
     for ar in aspect_ratios:
         w = math.sqrt(area * ar)
         h = math.sqrt(area / ar)
-        
         w = round(w / stride) * stride
         h = round(h / stride) * stride
-        
         buckets.add((w, h))
-        
     return sorted(list(buckets), key=lambda x: x[0]*x[1], reverse=True)
 
 BUCKETS = generate_buckets(Config.target_resolution, Config.bucket_alignment)
-
-print(f"--- CONFIGURATION ---")
-print(f"Target Resolution: {Config.target_resolution}x{Config.target_resolution}")
-print(f"Output Directory:  {Config.cache_dir}")
-print(f"Generated {len(BUCKETS)} Buckets:")
-
-for b in BUCKETS:
-    print(f" - {b[0]} x {b[1]} (AR: {b[0]/b[1]:.2f})")
-print("---------------------")
 
 def get_best_bucket(w, h):
     target_aspect = w / h
@@ -64,20 +46,20 @@ def setup_models():
 
 def process():
     os.makedirs(Config.cache_dir, exist_ok=True)
+    stride = Config.bucket_alignment
     
     files_in_dir = os.listdir(Config.cache_dir)
     if len(files_in_dir) > 0:
-        print(f"Overwriting cache in {Config.cache_dir} (cleaning old .pt files)...")
+        print(f"Overwriting cache in {Config.cache_dir}...")
         for f in files_in_dir:
             if f.endswith('.pt'):
                 os.remove(os.path.join(Config.cache_dir, f))
                 
     vae, tokenizer, text_model = setup_models()
+    print("Starting preprocessing with Strict Upscale Prevention...")
     
-    print("Starting preprocessing...")
     files = [f for f in os.listdir(Config.dataset_dir) if f.lower().endswith(('.jpg', '.jpeg', '.png', '.webp'))]
-    
-    bucket_counts = {b: 0 for b in BUCKETS}
+    bucket_counts = {}
     
     for filename in tqdm(files):
         try:
@@ -88,13 +70,21 @@ def process():
                  if not os.path.exists(txt_path): continue
 
             image = Image.open(img_path).convert("RGB")
-            w, h = image.size
-            bw, bh = get_best_bucket(w, h)
+            img_w, img_h = image.size
             
+            bw, bh = get_best_bucket(img_w, img_h)
+            
+            bw = min(bw, (img_w // stride) * stride)
+            bh = min(bh, (img_h // stride) * stride)
+            
+            bw = max(stride, bw)
+            bh = max(stride, bh)
+            
+            if (bw, bh) not in bucket_counts: bucket_counts[(bw, bh)] = 0
             bucket_counts[(bw, bh)] += 1
             
             target_aspect = bw / bh
-            img_aspect = w / h
+            img_aspect = img_w / img_h
 
             if img_aspect > target_aspect:
                 resize_h = bh
@@ -104,13 +94,9 @@ def process():
                 resize_h = int(bw / img_aspect)
             
             img = image.resize((resize_w, resize_h), resample=Image.LANCZOS)
-            
             left = (resize_w - bw) // 2
             top = (resize_h - bh) // 2
-            right = left + bw
-            bottom = top + bh
-            
-            img = img.crop((left, top, right, bottom))
+            img = img.crop((left, top, left + bw, top + bh))
             
             img_tensor = TF.to_tensor(img).unsqueeze(0).to(Config.device)
             img_tensor = TF.normalize(img_tensor, [0.5], [0.5])
@@ -143,15 +129,14 @@ def process():
     print(f"      STATS FOR {Config.target_resolution}px      ")
     print("="*30)
     total_images = sum(bucket_counts.values())
-    for (bw, bh), count in bucket_counts.items():
-        percentage = (count / total_images) * 100 if total_images > 0 else 0
-        if count > 0:
-            print(f"[{bw}x{bh}]: {count:3d} images ({percentage:.1f}%)")
+    sorted_buckets = sorted(bucket_counts.keys(), key=lambda x: x[0]*x[1], reverse=True)
+    for res_key in sorted_buckets:
+        count = bucket_counts[res_key]
+        percentage = (count / total_images) * 100
+        print(f"[{res_key[0]}x{res_key[1]}]: {count:3d} images ({percentage:.1f}%)")
     print("="*30)
-    print(f"Saved to {Config.cache_dir}")
 
 if __name__ == "__main__":
     start_time = time.time()
     process()
-    final_time = time.time() - start_time
-    print(f"Total time in minutes: {final_time / 60:.2f}")
+    print(f"Total time in minutes: {(time.time() - start_time) / 60:.2f}")

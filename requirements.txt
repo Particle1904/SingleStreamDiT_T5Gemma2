@@ -8,3 +8,5 @@ pandas
 matplotlib
 tqdm
 sentencepiece
+tiktoken
+protobuf

@@ -80,7 +80,7 @@ class Config:
     # MUST MATCH across preprocess / train / inference
     # ============================================================
     # Target training resolution (area-preserving bucketing)
-    target_resolution = 448
+    target_resolution = 512
     # Buckets aligned to multiples of this value
     bucket_alignment = 32
     # FLUX VAE scaling factor (Diffusers default for FLUX)
