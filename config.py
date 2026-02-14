@@ -52,8 +52,8 @@ class Config:
     # 1152 -> T5Gemma2-1B-1B
     # 2560 -> T5Gemma2-4B-4B
     text_embed_dim = 1152
-    # FLUX VAE latent channels (FLUX.1 uses 16)
-    in_channels = 16    
+    # FLUX VAE latent channels (FLUX.1 uses 16, FLUX.2 uses 32, SD VAE uses 4)
+    in_channels = 32    
 
     # DiT backbone
     hidden_size = 768
@@ -66,13 +66,14 @@ class Config:
     # Patch size in latent space (latent pixels per token)
     patch_size = 2
     # Rotary embedding base
-    rope_base = 10_000
+    rope_base = 256
     
     # ============================================================
     # REGION: EXTERNAL MODELS
     # HuggingFace / Diffusers model identifiers
     # ============================================================
-    vae_id = "diffusers/FLUX.1-vae"
+    #        "diffusers/FLUX.1-vae"
+    vae_id = "kaiyuyue/FLUX.2-dev-vae"
     text_model_id = "google/t5gemma-2-1b-1b"
     
     # ============================================================
@@ -88,7 +89,7 @@ class Config:
     vae_scaling_factor = 0.3611
     # Spatial downsample factor of the VAE
     # Used to compute latent H/W from image H/W
-    vae_downsample_factor= 8
+    vae_downsample_factor = 8
     # Dataset-wide latent normalization (computed post-preprocess)
     # normalize: (x - mean) / std
     # After testing it extensively, just using 0.0 and 1.0 results in better reconstructed images
@@ -103,7 +104,7 @@ class Config:
     # ============================================================
     # Base learning rate (AdamW / 8-bit Adam)
     # 1e-4 or 2e-4 for fresh/aggressive and 4e-5 or 5e-5 for fine-tuning
-    learning_rate = 2e-4   
+    learning_rate = 1e-4   
     # Total number of epochs (from scratch or resumed)
     epochs = 1200
     # Effective batch size per optimizer step

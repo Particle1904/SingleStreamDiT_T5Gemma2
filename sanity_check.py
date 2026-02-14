@@ -90,7 +90,7 @@ def sanity():
         model.eval()
         with torch.no_grad():
             torch_generator = torch.Generator(device=DEVICE).manual_seed(42)
-            initial_noise = torch.randn(1, 16, h // Config.vae_downsample_factor, w // Config.vae_downsample_factor, 
+            initial_noise = torch.randn(1, Config.in_channels, h // Config.vae_downsample_factor, w // Config.vae_downsample_factor, 
                                         generator=torch_generator, device=DEVICE, dtype=Config.dtype)
    
             uncond_embeds = torch.zeros_like(text)

@@ -157,7 +157,7 @@ def validate(accelerator, model, vae, epoch, global_step, is_ema=False):
     combined_text_embeds = torch.cat([uncond_embeds, text_embeds], dim=0)
 
     torch_generator = torch.Generator(device=Config.device).manual_seed(Config.seed)
-    initial_noise = torch.randn(1, 16, h // Config.vae_downsample_factor, w // Config.vae_downsample_factor, 
+    initial_noise = torch.randn(1, Config.in_channels, h // Config.vae_downsample_factor, w // Config.vae_downsample_factor, 
                                 generator=torch_generator, device=Config.device, dtype=Config.dtype)
     
     print(f"Validating {'EMA' if is_ema else 'RAW'}...")

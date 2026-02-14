@@ -327,7 +327,8 @@ class SingleStreamDiT(nn.Module):
                  fourier_stack_depth=Config.fourier_stack_depth,
                  max_token_length=Config.max_token_length,
                  use_fourier_in_refiner=Config.use_fourier_filters_in_refiner,
-                 dropout=Config.model_dropout):
+                 dropout=Config.model_dropout,
+                 rope_base=Config.rope_base):
         super().__init__()
         self.gradient_checkpointing = gradient_checkpointing
         self.patch_size = patch_size
@@ -354,7 +355,7 @@ class SingleStreamDiT(nn.Module):
             nn.Linear(hidden_size, hidden_size)
         )
         
-        self.rope = Rope3D(self.head_dim)
+        self.rope = Rope3D(self.head_dim, rope_base)
         
         self.noise_refiner = nn.ModuleList([
             VisualFusionBlock(hidden_size, num_heads, dropout=dropout, use_fourier=self.use_fourier_in_refiner) 
