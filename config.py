@@ -4,7 +4,7 @@ from accelerate.utils import set_seed
 from accelerate import Accelerator, DistributedDataParallelKwargs
 
 ddp_kwargs = DistributedDataParallelKwargs(find_unused_parameters=True)
-_accelerator = Accelerator(log_with="wandb", kwargs_handlers=[ddp_kwargs])
+_accelerator = Accelerator(log_with="wandb", kwargs_handlers=[ddp_kwargs], mixed_precision="bf16")
 set_seed(42)
 
 class Config:
@@ -26,8 +26,8 @@ class Config:
         output_dir = "/kaggle/working/output"
         cache_dir = "/kaggle/input/oxfordflowers/cached_data"
     else:
-        cache_dir = "./cached_data"  
         output_dir = "./output"
+        cache_dir = "./cached_data"  
     
     project_name = "flowers"
     dataset_dir = "./dataset"
@@ -36,7 +36,7 @@ class Config:
     log_dir = os.path.join(output_dir, "logs")
     log_file = os.path.join(log_dir, f"{project_name}_log.csv")    
     # Used by sanity_check / cache inspection utilities
-    target_file = os.path.join(cache_dir, "39.pt")        
+    target_file = os.path.join(cache_dir, "10004661.pt")        
     # Resume training from a full checkpoint (model + optimizer + EMA)
     # Set to None for a fresh run
     resume_from = None
@@ -56,13 +56,13 @@ class Config:
     in_channels = 32    
 
     # DiT backbone
-    hidden_size = 768
+    hidden_size = 1152
     num_heads = 12
     depth = 16
     # Separate refinement stages
     refiner_depth = 2
     # Max token length for text conditioning
-    max_token_length = 128
+    max_token_length = 256
     # Patch size in latent space (latent pixels per token)
     patch_size = 2
     # Rotary embedding base
@@ -81,7 +81,7 @@ class Config:
     # MUST MATCH across preprocess / train / inference
     # ============================================================
     # Target training resolution (area-preserving bucketing)
-    target_resolution = 512
+    target_resolution = 256
     # Buckets aligned to multiples of this value
     bucket_alignment = 32
     # FLUX VAE scaling factor (Diffusers default for FLUX)
@@ -106,10 +106,10 @@ class Config:
     # 1e-4 or 2e-4 for fresh/aggressive and 4e-5 or 5e-5 for fine-tuning
     learning_rate = 1e-4   
     # Total number of epochs (from scratch or resumed)
-    epochs = 1200
+    epochs = 1000
     # Effective batch size per optimizer step
     batch_size = 16
-    accum_steps = 2
+    accum_steps = 1
     # Loss for velocity prediction
     # Options: "mse", "l1", "huber"
     loss_type = "mse"
@@ -148,7 +148,7 @@ class Config:
     # ============================================================
     # REGION:  Fourier Correlation Loss
     # ============================================================
-    fcl_lambda = 0.1
+    fcl_lambda = 0.5
     # Set to false to disable the 2 fourier filters in refiner layers
     use_fourier_filters_in_refiner = True 
     # Set to 0 to disable the final stack
@@ -157,9 +157,9 @@ class Config:
     # REGION: OPTIMIZATION & PRECISION
     # Runtime and numerical behavior
     # ============================================================
-    dtype = torch.float32
+    dtype = torch.bfloat16
 
-    gradient_checkpointing = False
+    gradient_checkpointing = True
     # Exponential Moving Average for inference stability
     use_ema = True
     ema_decay = 0.999
@@ -176,7 +176,7 @@ class Config:
     # ============================================================
     # REGION: LOGGING & VALIDATION
     # ============================================================
-    run_validation_loss = True 
+    run_validation_loss = False 
     save_every = 100
     validate_every = 50
     # Validation sampling parameters

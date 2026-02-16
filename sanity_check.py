@@ -8,6 +8,7 @@ from diffusers import AutoencoderKL
 from PIL import Image, ImageDraw, ImageFont
 from torch.optim.swa_utils import AveragedModel, get_ema_multi_avg_fn
 from transformers import get_cosine_schedule_with_warmup 
+from diffusers.models import AutoencoderKL as DiffusersAutoencoderKL
 from train import get_gate_stats
 from config import Config
 from latents import decode_latents_to_image
@@ -83,8 +84,13 @@ def sanity():
     warmup_steps = int(STEPS * Config.optimizer_warmup)
     scheduler = get_cosine_schedule_with_warmup(optimizer, num_warmup_steps=warmup_steps, num_training_steps=STEPS)
     
-    print(f"Loading VAE: {Config.vae_id}...")
-    vae = AutoencoderKL.from_pretrained(Config.vae_id).to(DEVICE)
+    vae = None  
+    if "FLUX.2" in Config.vae_id:
+        print("Loading FLUX2 VAE...")
+        vae = DiffusersAutoencoderKL.from_pretrained(Config.vae_id).to(Config.device).eval()
+    else:
+        print("Loading generic VAE...")
+        vae = AutoencoderKL.from_pretrained(Config.vae_id).to(Config.device).eval()
 
     def validate(step_count):
         model.eval()

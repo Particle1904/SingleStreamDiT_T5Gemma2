@@ -7,6 +7,7 @@ from torchvision import transforms
 import torchvision.transforms.functional as TF
 from transformers import AutoTokenizer, AutoModel
 from diffusers import AutoencoderKL
+from diffusers.models import AutoencoderKL as DiffusersAutoencoderKL
 from tqdm import tqdm
 from config import Config
 
@@ -36,7 +37,13 @@ def get_best_bucket(w, h):
 
 def setup_models():
     print(f"Loading VAE: {Config.vae_id}...")
-    vae = AutoencoderKL.from_pretrained(Config.vae_id).to(Config.device).eval()
+    vae = None  
+    if "FLUX.2" in Config.vae_id:
+        print("Loading FLUX2 VAE...")
+        vae = DiffusersAutoencoderKL.from_pretrained(Config.vae_id).to(Config.device).eval()
+    else:
+        print("Loading generic VAE...")
+        vae = AutoencoderKL.from_pretrained(Config.vae_id).to(Config.device).eval()
     print(f"Loading Text Encoder: {Config.text_model_id}...")
     tokenizer = AutoTokenizer.from_pretrained(Config.text_model_id)
     full_model = AutoModel.from_pretrained(Config.text_model_id, trust_remote_code=True)

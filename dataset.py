@@ -29,8 +29,7 @@ class TextImageDataset(Dataset):
         if len(self.files) == 0:
             raise ValueError(f"No .pt files found in {Config.cache_dir}")
         
-        self.cache = {}
-        
+        self.cache = {}        
         self.buckets = {}
         
         print(f"Indexing {len(self.files)} files (RAM Cache: {Config.load_entire_dataset})...")
