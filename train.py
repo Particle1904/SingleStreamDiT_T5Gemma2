@@ -212,10 +212,11 @@ def train():
 
     model, optimizer, train_loader, scheduler = accelerator.prepare(model, optimizer, train_loader, scheduler)
     unwrapped_model = accelerator.unwrap_model(model)
-    if hasattr(ema_model, 'module'):
-        ema_model.module.load_state_dict(unwrapped_model.state_dict())
-    else:
-        ema_model.load_state_dict(unwrapped_model.state_dict())
+    if not (can_attempt_resume(Config.resume_from) and resolved_path is not None):
+        if hasattr(ema_model, 'module'):
+            ema_model.module.load_state_dict(unwrapped_model.state_dict())
+        else:
+            ema_model.load_state_dict(unwrapped_model.state_dict())
        
     if sys.platform.startswith('linux'):
         try:
@@ -246,13 +247,13 @@ def train():
                 if accelerator.sync_gradients:
                     global_step += 1
                     
-                    ema_model.update_parameters(accelerator.unwrap_model(model))
                     
                     accelerator.clip_grad_norm_(model.parameters(), max_norm=1.0)
                     optimizer.step()
                     scheduler.step()
                     optimizer.zero_grad()
-                    
+                    ema_model.update_parameters(accelerator.unwrap_model(model))
+                                        
                     if global_step % LOG_EVERY_STEPS == 0:
                         lr_current = optimizer.param_groups[0]['lr']
                         avg_gate, min_gate, max_gate = get_gate_stats(model)      
