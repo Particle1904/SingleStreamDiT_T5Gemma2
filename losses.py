@@ -5,6 +5,7 @@ from samplers import cfg_guided_position, predict_x1_from_velocity, get_1d_shift
 def prepare_batch_and_targets(batch, device, dtype, shift_val, offset_noise):
     x_1 = batch["latents"].to(device, dtype=dtype)
     text = batch["text_embeds"].to(device, dtype=dtype)
+    text_mask = batch["text_mask"].to(device)
     
     u = torch.rand(x_1.shape[0], device=device, dtype=dtype)
     t = get_1d_shifted_time(u, shift_val)            
@@ -12,10 +13,9 @@ def prepare_batch_and_targets(batch, device, dtype, shift_val, offset_noise):
     x_0 = x_0 + offset_noise * torch.randn(x_1.shape[0], x_1.shape[1], 1, 1, device=device, dtype=dtype)            
     
     x_t = (1.0 - t.view(-1,1,1,1)) * x_0 + t.view(-1,1,1,1) * x_1
-    # v_target = x_1 - x_0
     target = x_1 - x_0
 
-    return x_t, t, x_1, target, text
+    return x_t, t, x_1, target, text, text_mask
 
 def get_base_loss(v_pred: torch.Tensor, target: torch.Tensor, loss_type: str) -> torch.Tensor:
     if loss_type == "mse":
@@ -68,22 +68,23 @@ def get_fourier_correlation_loss(x_hat_1: torch.Tensor, x_1: torch.Tensor, t: to
     return fcl_lambda * loss_fcl
 
 def get_self_eval_loss(x_hat_1: torch.Tensor, x_1: torch.Tensor, t: torch.Tensor, s: torch.Tensor, 
-                       ema_model: torch.nn.Module, text: torch.Tensor, self_eval_lambda: float, 
-                       cfg_val: float = 1.5) -> torch.Tensor:
+                       ema_model: torch.nn.Module, text: torch.Tensor, text_mask: torch.Tensor, 
+                       self_eval_lambda: float, cfg_val: float = 1.5) -> torch.Tensor:
     # Note: This function is expected to be called inside torch.no_grad() for the teacher part
     noise_s = torch.randn_like(x_hat_1)
     x_hat_s = (1.0 - s.view(-1, 1, 1, 1)) * noise_s + s.view(-1, 1, 1, 1) * x_hat_1
     
     teacher_net = ema_model.module if hasattr(ema_model, 'module') else ema_model
-    
+
     text_uncond = torch.zeros_like(text)
     combined_text = torch.cat([text_uncond, text], dim=0)
+    combined_mask = torch.cat([text_mask, text_mask], dim=0)
     
     with torch.no_grad():
-        x_self = cfg_guided_position(model=teacher_net, x=x_hat_s, t=s, text_embeds=combined_text, cfg=cfg_val)
+        x_self = cfg_guided_position(teacher_net, x_hat_s, s, combined_text, cfg_val, combined_mask)
     x_self = x_hat_1 + (x_self - x_hat_s)
     
-    lambd_weight = (t / (1.0 - t + 1e-4)) - (s / (1.0 - s + 1e-4))
+    lambd_weight = (s / (1.0 - s + 1e-4)) - (t / (1.0 - t + 1e-4))
     lambd_weight = lambd_weight.view(-1, 1, 1, 1).clamp(0, 10)
     
     target_raw = x_1 + lambd_weight * x_self
@@ -97,10 +98,10 @@ def get_self_eval_loss(x_hat_1: torch.Tensor, x_1: torch.Tensor, t: torch.Tensor
     
     return loss_self * self_eval_lambda
 
-def calculate_total_loss(model, ema_model, x_t, t, x_1, target, text, epoch, epochs, use_self_eval, 
-                         start_self_eval_at, self_eval_lambda, fal_lambda, fcl_lambda, loss_type, accum_steps):
+def calculate_total_loss(model, ema_model, x_t, t, x_1, target, text, text_mask, epoch, epochs, use_self_eval, 
+                         start_self_eval_at, self_eval_lambda, fal_lambda, fcl_lambda, loss_type):
     # Model forward pass
-    v_pred = model(x_t, t, text)
+    v_pred = model(x_t, t, text, text_mask)
     
     # Base Velocity Loss
     loss_real = get_base_loss(v_pred, target, loss_type)
@@ -130,9 +131,7 @@ def calculate_total_loss(model, ema_model, x_t, t, x_1, target, text, epoch, epo
     # Self-Evaluation Loss
     if use_self_eval and epoch > (epochs * start_self_eval_at):
         s = t + torch.rand_like(t) * (1.0 - t)
-        loss_self = get_self_eval_loss(x_hat_1=x_hat_1, x_1=x_1, t=t, s=s, 
-                                       ema_model=ema_model, text=text, 
-                                       self_eval_lambda=self_eval_lambda, cfg_val=1.5)                    
+        loss_self = get_self_eval_loss(x_hat_1, x_1, t, s, ema_model, text, text_mask, self_eval_lambda, cfg_val=1.5)                    
         loss = loss + loss_self                    
     
-    return loss / accum_steps
+    return loss

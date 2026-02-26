@@ -1,47 +1,46 @@
 import os
 import torch
-from accelerate.utils import set_seed
-from accelerate import Accelerator, DistributedDataParallelKwargs
-
-ddp_kwargs = DistributedDataParallelKwargs(find_unused_parameters=True)
-_accelerator = Accelerator(log_with="wandb", kwargs_handlers=[ddp_kwargs], mixed_precision="bf16")
-set_seed(42)
+import argparse
+import sys
 
 class Config:
     # ============================================================
     #
     #                          IMPORTANT
     #
-    # - VAE scaling + latent normalization MUST remain consistent across
-    #   preprocess.py, train.py, and inference.
+    # - VAE scaling + latent normalization MUST remain consistent 
+    #   across preprocess.py, train.py, and inference.
     # - Changing model dimensions invalidates checkpoints.
     # ============================================================
     # REGION: PROJECT & PATHS
     # General experiment metadata and filesystem layout
     # ============================================================
     seed = 42
-    is_kaggle = os.path.exists("/kaggle/working")
+    project_name = "flowers"
     
+    is_kaggle = os.environ.get("KAGGLE_KERNEL_RUN_TYPE") is not None
     if is_kaggle:
         output_dir = "/kaggle/working/output"
         cache_dir = "/kaggle/input/oxfordflowers/cached_data"
+        print("Kaggle kernel detected.")
     else:
         output_dir = "./output"
         cache_dir = "./cached_data"  
-    
-    project_name = "flowers"
+        print("Not in Kaggle kernel.")
     dataset_dir = "./dataset"
     checkpoint_dir = os.path.join(output_dir, "checkpoints")
     samples_dir = os.path.join(output_dir, "samples")
     log_dir = os.path.join(output_dir, "logs")
     log_file = os.path.join(log_dir, f"{project_name}_log.csv")    
+    
     # Used by sanity_check / cache inspection utilities
-    target_file = os.path.join(cache_dir, "10004661.pt")        
+    target_filename = "39.pt"
+    target_file = os.path.join(cache_dir, target_filename)        
     # Resume training from a full checkpoint (model + optimizer + EMA)
-    # Set to None for a fresh run
+    # Set to None for a fresh run or "latest" for HF model
     resume_from = None
     # Reset optimizer when resume training
-    reset_optimizer = True
+    reset_optimizer = False
         
     # ============================================================
     # REGION: MODEL ARCHITECTURE
@@ -58,7 +57,7 @@ class Config:
     # DiT backbone
     hidden_size = 1152
     num_heads = 12
-    depth = 16
+    depth = 12
     # Separate refinement stages
     refiner_depth = 2
     # Max token length for text conditioning
@@ -72,7 +71,7 @@ class Config:
     # REGION: EXTERNAL MODELS
     # HuggingFace / Diffusers model identifiers
     # ============================================================
-    #        "diffusers/FLUX.1-vae"
+    # "diffusers/FLUX.1-vae"
     vae_id = "kaiyuyue/FLUX.2-dev-vae"
     text_model_id = "google/t5gemma-2-1b-1b"
     
@@ -81,20 +80,23 @@ class Config:
     # MUST MATCH across preprocess / train / inference
     # ============================================================
     # Target training resolution (area-preserving bucketing)
-    target_resolution = 256
+    target_resolution = 512
     # Buckets aligned to multiples of this value
     bucket_alignment = 32
     # FLUX VAE scaling factor (Diffusers default for FLUX)
     # Latents are MULTIPLIED by this during encode
+    # NOTE: FLUX.2-dev-vae (AutoencoderKLFlux2) normalization is handled
+    # internally by the VAE. to_vae_space / from_vae_space are identity.
     vae_scaling_factor = 0.3611
     # Spatial downsample factor of the VAE
     # Used to compute latent H/W from image H/W
     vae_downsample_factor = 8
     # Dataset-wide latent normalization (computed post-preprocess)
     # normalize: (x - mean) / std
-    # After testing it extensively, just using 0.0 and 1.0 results in better reconstructed images
-    # By just using calculate_vae_statistics.py and changing the values below, the reconstructed images
-    # get a very weak blue tint effect and tiling pattern.
+    # After testing it extensively, just using 0.0 and 1.0 results 
+    # in better reconstructed image. By just using calculate_vae_statistics.py 
+    # and changing the values below, the reconstructed images get a very weak 
+    # blue tint effect and tiling pattern.
     dataset_mean = 0.0
     dataset_std = 1.0
 
@@ -104,12 +106,13 @@ class Config:
     # ============================================================
     # Base learning rate (AdamW / 8-bit Adam)
     # 1e-4 or 2e-4 for fresh/aggressive and 4e-5 or 5e-5 for fine-tuning
-    learning_rate = 1e-4   
+    learning_rate = 2e-4
     # Total number of epochs (from scratch or resumed)
-    epochs = 1000
+    epochs = 2000
     # Effective batch size per optimizer step
     batch_size = 16
     accum_steps = 1
+    dynamic_buckets = False
     # Loss for velocity prediction
     # Options: "mse", "l1", "huber"
     loss_type = "mse"
@@ -122,7 +125,17 @@ class Config:
     # Drop text conditioning during training (CFG support)    
     text_dropout = 0.15
     # Random horizontal flip in latent space
-    flip_aug = False       
+    flip_aug = False 
+    
+    # ============================================================
+    # REGION: OPTIMIZATION & PRECISION
+    # Runtime and numerical behavior
+    # ============================================================
+    dtype = torch.bfloat16
+    gradient_checkpointing = True
+    # Exponential Moving Average for inference stability
+    use_ema = True
+    ema_decay = 0.999
     
     # ============================================================
     # REGION: FLOW MATCHING & SAMPLING
@@ -142,33 +155,21 @@ class Config:
     self_eval_lambda = 0.3
     
     # ============================================================
-    # REGION:  Fourier Amplitude Loss
-    # ============================================================
-    fal_lambda = 0.5
-    # ============================================================
-    # REGION:  Fourier Correlation Loss
-    # ============================================================
-    fcl_lambda = 0.5
+    # REGION:  FOURIER LOSSES & LAYERS
+    # Fourier Amplitude Loss lambda
+    fal_lambda = 0.0
+    # Fourier Correlation Loss lambda
+    fcl_lambda = 0.0
     # Set to false to disable the 2 fourier filters in refiner layers
     use_fourier_filters_in_refiner = True 
     # Set to 0 to disable the final stack
     fourier_stack_depth = 2
-    # ============================================================
-    # REGION: OPTIMIZATION & PRECISION
-    # Runtime and numerical behavior
-    # ============================================================
-    dtype = torch.bfloat16
-
-    gradient_checkpointing = True
-    # Exponential Moving Average for inference stability
-    use_ema = True
-    ema_decay = 0.999
-    
+        
     # ============================================================
     # REGION: SYSTEM & DATALOADING
     # ============================================================
-    accelerator = _accelerator
-    device = _accelerator.device
+    accelerator = None
+    device = "cuda" if torch.cuda.is_available() else "cpu"
     # Cache entire dataset in RAM (recommended for <= ~20k images)
     load_entire_dataset = True
     num_workers = 2 if os.name != 'nt' else 0
@@ -178,7 +179,7 @@ class Config:
     # ============================================================
     run_validation_loss = False 
     save_every = 100
-    validate_every = 50
+    validate_every = 25
     # Validation sampling parameters
     validate_cfg = 3.00
     validate_steps = 30 
@@ -190,5 +191,26 @@ class Config:
     # ============================================================
     inference_steps = 50
     guidance_scale = 3.5
-    # "euler" or "rk4"
+    # Options: "euler" or "rk4"
     sampler = "rk4"
+    
+    # ============================================================
+    # REGION: HUGGINGFACE INTEGRATION
+    # ============================================================
+    push_to_hub = True  # Set to True to enable HF uploads
+    hf_repo_id = "Crowlley/SingleStreamDiT-T5Gemma2" 
+    hf_token = os.environ.get("HF_TOKEN")
+    
+def parse_config_args():
+    parser = argparse.ArgumentParser(description="Override Config parameters")
+    for key, value in Config.__dict__.items():
+        if not key.startswith("__") and not callable(value):
+            if isinstance(value, bool):
+                parser.add_argument(f"--{key}", type=lambda x: (str(x).lower() == 'true'), default=value)
+            else:
+                parser.add_argument(f"--{key}", type=type(value) if value is not None else str, default=value)
+    
+    args, unknown = parser.parse_known_args()
+    
+    for key, value in vars(args).items():
+        setattr(Config, key, value)

@@ -9,10 +9,10 @@ def denormalize_latents(latents: torch.Tensor) -> torch.Tensor:
     return latents * Config.dataset_std + Config.dataset_mean
 
 def to_vae_space(latents: torch.Tensor) -> torch.Tensor:
-    return latents / Config.vae_scaling_factor
+    return latents
 
 def from_vae_space(latents: torch.Tensor) -> torch.Tensor:
-    return latents * Config.vae_scaling_factor
+    return latents
 
 def prepare_latents_for_decode(latents: torch.Tensor, clamp=False, print_debug=False) -> torch.Tensor:
     latents = denormalize_latents(latents)
@@ -58,7 +58,8 @@ def get_combined_text_embeds(prompt: str, neg_prompt: str, cfg: float, tokenizer
         uncond_embeds = out_uncond.last_hidden_state if hasattr(out_uncond, "last_hidden_state") else out_uncond[0]
     else:
         uncond_embeds = torch.zeros_like(cond_embeds)
+        uncond_mask = torch.ones(cond_embeds.shape[0], cond_embeds.shape[1], dtype=torch.bool, device=device)
     
     combined_text = torch.cat([uncond_embeds, cond_embeds], dim=0).to(dtype=dtype)
-    
-    return combined_text
+    combined_mask = torch.cat([uncond_mask, inputs_cond.attention_mask.bool()], dim=0)
+    return combined_text, combined_mask

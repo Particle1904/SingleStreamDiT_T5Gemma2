@@ -7,7 +7,6 @@ from tqdm import tqdm
 from config import Config
 from latents import normalize_latents
 
-
 # Used for Validation on 200 flowers dataset.
 def split_dataset_indices(total_files, items_per_category=20, val_per_category=4):
     train_indices = []
@@ -59,6 +58,7 @@ class TextImageDataset(Dataset):
 
         latents = data["latents"]
         text = data["text_embeds"]
+        mask = data.get("attention_mask", torch.ones(text.shape[0], dtype=torch.bool))
         
         latents = normalize_latents(latents)
         
@@ -67,10 +67,12 @@ class TextImageDataset(Dataset):
             
         if random.random() < Config.text_dropout:
             text = torch.zeros_like(text)
+            mask = torch.ones_like(mask)
             
         return {
             "latents": latents,
             "text_embeds": text,
+            "text_mask": mask,
             "height": data["height"],
             "width": data["width"]
         }

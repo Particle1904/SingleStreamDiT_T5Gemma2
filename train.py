@@ -1,30 +1,31 @@
 import os
 import sys
 import torch
-import time
-import re
-import glob
 import csv
+import warnings
 import bitsandbytes as bnb
-from torch.utils.data import DataLoader
-from tqdm import tqdm
-from model import SingleStreamDiT
-from diffusers import AutoencoderKL
-from PIL import Image
-from torch.optim.swa_utils import AveragedModel, get_ema_multi_avg_fn
-from transformers import get_cosine_schedule_with_warmup
-from diffusers.models import AutoencoderKL as DiffusersAutoencoderKL
-from config import Config
-from dataset import TextImageDataset, BucketBatchSampler, split_dataset_indices
-from latents import decode_latents_to_image
-from samplers import run_sampling_pipeline
-from losses import calculate_total_loss, prepare_batch_and_targets
 import wandb
 import builtins
+import time
+import math
+from torch.utils.data import DataLoader
+from accelerate import Accelerator, DistributedDataParallelKwargs
+from accelerate.utils import set_seed
+from accelerate.utils import find_executable_batch_size
+from tqdm import tqdm
+from torch.optim.swa_utils import AveragedModel, get_ema_multi_avg_fn
+from transformers import get_cosine_schedule_with_warmup
+from model import SingleStreamDiT
+from config import Config, parse_config_args
+from dataset import TextImageDataset, BucketBatchSampler
+from latents import decode_latents_to_image
+from model_loader import load_vae
+from samplers import run_sampling_pipeline
+from losses import calculate_total_loss, prepare_batch_and_targets
+from checkpoint_manager import CheckpointManager
+from utilities import parse_run_name
 
-if not Config.accelerator.is_main_process:
-    def print_pass(*args, **kwargs): pass
-    builtins.print = print_pass
+warnings.filterwarnings("ignore", message="The `local_dir_use_symlinks` argument is deprecated")
 
 torch.backends.cuda.enable_flash_sdp(True)
 torch.backends.cuda.enable_mem_efficient_sdp(True)
@@ -34,28 +35,20 @@ torch.backends.cudnn.allow_tf32 = True
 torch.backends.cudnn.benchmark = True 
 
 GATE_LEARNING_RATE_MULTIPLIER = 1
-
 LOG_EVERY_STEPS = 1 
 
-def setup_dirs():
-    os.makedirs(Config.checkpoint_dir, exist_ok=True)
-    os.makedirs(Config.samples_dir, exist_ok=True)
-    os.makedirs(os.path.dirname(Config.log_file), exist_ok=True)
+parse_config_args()
+Config.target_file = os.path.join(Config.cache_dir, Config.target_filename)
+Config.checkpoint_dir = os.path.join(Config.output_dir, "checkpoints")
+Config.samples_dir = os.path.join(Config.output_dir, "samples")
+Config.log_file = os.path.join(Config.output_dir, "logs", f"{Config.project_name}_log.csv")
 
-def cleanup_checkpoints(directory, prefix, keep_last_n=1):
-    search_pattern = os.path.join(directory, f"{prefix}*.pt")
-    files = glob.glob(search_pattern)
-    if len(files) <= keep_last_n: 
-        return
-    
-    def get_epoch_num(filepath):
-        match = re.search(r"epoch_(\d+)", filepath)
-        return int(match.group(1)) if match else -1
-    files.sort(key=get_epoch_num)
-    for f in files[:-keep_last_n]:
-        try: os.remove(f)
-        except: 
-            pass
+def can_attempt_resume(resume_value):
+    if resume_value is None:
+        return False
+    if resume_value == "latest":
+        return True
+    return os.path.exists(resume_value)
 
 def get_gate_stats(model):
     m = model.module if hasattr(model, "module") else model
@@ -64,21 +57,6 @@ def get_gate_stats(model):
     if not gate_values: 
         return 0.0, 0.0, 0.0
     return sum(gate_values)/len(gate_values), min(gate_values), max(gate_values)
-
-@torch.no_grad()
-def calculate_validation_loss(accelerator, model, val_loader, epoch):
-    model.eval()
-    total_loss = 0.0
-    num_batches = 0
-    for batch in val_loader:
-        x_t, t, x_1, target, text = prepare_batch_and_targets(batch, Config.device, Config.dtype, Config.shift_val, Config.offset_noise)
-        loss = calculate_total_loss(model, None, x_t, t, x_1, target, text, epoch, Config.epochs, loss_type=Config.loss_type)
-        total_loss += loss.item()
-        num_batches += 1
-    avg_loss = total_loss / max(num_batches, 1)
-    avg_loss = accelerator.gather(torch.tensor(avg_loss, device=Config.device).unsqueeze(0)).mean().item()
-    model.train()
-    return avg_loss
 
 class CSVLogger:
     def __init__(self, filepath, resume=False):
@@ -101,71 +79,101 @@ def validate(accelerator, model, vae, epoch, global_step, is_ema=False):
     data = torch.load(Config.target_file, map_location="cpu")
     h, w = data["height"], data["width"]    
     text_embeds = data["text_embeds"].unsqueeze(0).to(Config.device, Config.dtype)
+    text_mask = data["attention_mask"].unsqueeze(0).to(Config.device)
     uncond_embeds = torch.zeros_like(text_embeds)
     combined_text_embeds = torch.cat([uncond_embeds, text_embeds], dim=0)
+    combined_mask = torch.cat([text_mask, text_mask], dim=0)
 
     torch_generator = torch.Generator(device=Config.device).manual_seed(Config.seed)
-    initial_noise = torch.randn(1, Config.in_channels, h // Config.vae_downsample_factor, w // Config.vae_downsample_factor, 
+    initial_noise = torch.randn(1, Config.in_channels, h // Config.vae_downsample_factor, 
+                                w // Config.vae_downsample_factor, 
                                 generator=torch_generator, device=Config.device, dtype=Config.dtype)
     
     print(f"Validating {'EMA' if is_ema else 'RAW'}...")
     with torch.autocast(device_type="cuda", dtype=Config.dtype):
-        final_latents = run_sampling_pipeline(model=model, initial_noise=initial_noise, steps=Config.validate_steps, 
+        final_latents = run_sampling_pipeline(model=model, initial_noise=initial_noise, 
+                                              steps=Config.validate_steps, 
                                               combined_text_embeds=combined_text_embeds, cfg=Config.validate_cfg, 
-                                              sampler_type=Config.validate_sampler, shift_val=Config.shift_val)
+                                              text_mask=combined_mask, sampler_type=Config.validate_sampler, 
+                                              shift_val=Config.shift_val)
        
     image = decode_latents_to_image(vae_model=vae, latents=final_latents, device=Config.device)
     
-    accelerator.get_tracker("wandb").log({"validation_sample": wandb.Image(image)}, step=global_step)
+    key_name = "validation_sample_ema" if is_ema else "validation_sample_raw"
+    accelerator.get_tracker("wandb").log({key_name: wandb.Image(image)}, step=global_step)
+    
     image.save(f"{Config.samples_dir}/{'EMA_' if is_ema else 'RAW_'}epoch_{epoch}.png")
     model.train()
 
 def train():
-    accelerator = Config.accelerator
+    checkpoint_manager = CheckpointManager(Config)
+    mixed_precision_string = "fp16" if Config.dtype == torch.float16 else "bf16" if Config.dtype == torch.bfloat16 else "no"
+    accelerator = Accelerator(log_with="wandb", mixed_precision=mixed_precision_string, 
+                              gradient_accumulation_steps=Config.accum_steps,
+                              kwargs_handlers=[DistributedDataParallelKwargs(find_unused_parameters=True)])
+    set_seed(Config.seed)
+    Config.device = accelerator.device
+    Config.accelerator = accelerator
+    
+    if not Config.accelerator.is_main_process:
+        def print_pass(*args, **kwargs): pass
+        builtins.print = print_pass
+        
+    if accelerator.is_main_process:
+        checkpoint_manager.setup_dirs()
+    
+    wandb_run_id = None
+    resume_flag = "allow"
+    
+    if can_attempt_resume(Config.resume_from):
+        resolved_path = checkpoint_manager._resolve_path(Config.resume_from)
+        if resolved_path is not None:
+            found_id = checkpoint_manager.load_run_id(resolved_path)
+            if found_id:
+                wandb_run_id = found_id
+                print(f"Found WandB Run ID in checkpoint: {wandb_run_id}")
+    
+    accelerator.init_trackers(project_name=Config.project_name, 
+                              config={k: v for k, v in Config.__dict__.items() if not k.startswith("__")},
+                              init_kwargs={"wandb": {
+                                  "name": parse_run_name(),
+                                  "id": wandb_run_id, 
+                                  "resume": resume_flag
+                              }})
     
     if accelerator.is_main_process:
-        setup_dirs()
-    
-    accelerator.init_trackers(
-        project_name=Config.project_name,
-        config={k: v for k, v in Config.__dict__.items() if not k.startswith("__")}
-    )
-        
+        wandb_run_id = accelerator.get_tracker("wandb").run.id
+
     print(f"Loading DiT & VAE...")
-    model = SingleStreamDiT(in_channels=Config.in_channels, gradient_checkpointing=Config.gradient_checkpointing).to(Config.device)    
+    model = SingleStreamDiT(in_channels=Config.in_channels, 
+                            gradient_checkpointing=Config.gradient_checkpointing).to(Config.device, Config.dtype) 
     
-    vae = None  
-    if "FLUX.2" in Config.vae_id:
-        print("Loading FLUX2 VAE...")
-        vae = DiffusersAutoencoderKL.from_pretrained(Config.vae_id).to(Config.device).eval()
-    else:
-        print("Loading generic VAE...")
-        vae = AutoencoderKL.from_pretrained(Config.vae_id).to(Config.device).eval()
+    vae = load_vae()
     
     model.initialize_weights()
     ema_model = AveragedModel(model, multi_avg_fn=get_ema_multi_avg_fn(Config.ema_decay))
     
-    start_epoch = 0
-    global_step = 0
-    checkpoint_data = None
-    
-    if Config.resume_from and os.path.exists(Config.resume_from):
-        checkpoint_data = torch.load(Config.resume_from, map_location=Config.device)
-        model.load_state_dict(checkpoint_data.get('model_state_dict', checkpoint_data))
-        if 'ema_state_dict' in checkpoint_data:
-            ema_model.module.load_state_dict(checkpoint_data['ema_state_dict'])
-        start_epoch = checkpoint_data.get('epoch', 0) + 1
-        global_step = checkpoint_data.get('global_step', 0)
-    
     full_dataset = TextImageDataset()
     train_idx_set = set(range(len(full_dataset)))
-    val_loader = None
-    
     train_buckets = {res: [i for i in idxs if i in train_idx_set] for res, idxs in full_dataset.buckets.items() if any(i in train_idx_set for i in idxs)}
-    train_loader = DataLoader(full_dataset, batch_sampler=BucketBatchSampler(train_buckets, batch_size=Config.batch_size), num_workers=Config.num_workers)
+    if accelerator.num_processes > 1:
+        new_buckets = {}
+        for res, indices in train_buckets.items():
+            remainder = len(indices) % accelerator.num_processes
+            if remainder > 0:
+                padding_size = accelerator.num_processes - remainder
+                indices = indices + indices[:padding_size]
+                
+            sharded_indices = indices[accelerator.process_index::accelerator.num_processes]
+            if sharded_indices:
+                new_buckets[res] = sharded_indices
+        train_buckets = new_buckets
+    train_loader = DataLoader(full_dataset, 
+                              batch_sampler=BucketBatchSampler(train_buckets, batch_size=Config.batch_size), 
+                              num_workers=Config.num_workers)
     
-    steps_per_epoch = len(train_loader) // Config.accum_steps
-    total_steps = steps_per_epoch * (Config.epochs - start_epoch)
+    steps_per_epoch = math.ceil(len(train_loader) / Config.accum_steps)
+    total_steps = steps_per_epoch * Config.epochs
     warmup_steps = int(total_steps * Config.optimizer_warmup)
 
     param_base = [p for n, p in model.named_parameters() if 'fourier_filter.gate' not in n]
@@ -176,7 +184,38 @@ def train():
     ], lr=Config.learning_rate) 
     
     scheduler = get_cosine_schedule_with_warmup(optimizer, num_warmup_steps=warmup_steps, num_training_steps=total_steps)
+    
+    start_epoch = 0
+    global_step = 0
+    
+    if can_attempt_resume(Config.resume_from):
+        resolved_path = checkpoint_manager._resolve_path(Config.resume_from)
+        if resolved_path is not None:
+            opt_ref = None if Config.reset_optimizer else optimizer
+            sched_ref = None if Config.reset_optimizer else scheduler
+            start_epoch, global_step = checkpoint_manager.load(resolved_path, model, ema_model, opt_ref, sched_ref)
+            if Config.reset_optimizer:
+                print(f"Resetting Scheduler for remaining epochs: {Config.epochs - start_epoch}")
+        else:
+            print(f"Could not resolve resume path: {Config.resume_from}")
+            
+            remaining_epochs = Config.epochs - start_epoch
+            if remaining_epochs < 1:
+                print("Warning: No epochs remaining. Increasing limit by 10.")
+                Config.epochs += 10
+                remaining_epochs = 10
+                
+            new_total_steps = steps_per_epoch * remaining_epochs
+            new_warmup = int(new_total_steps * Config.optimizer_warmup)
+            
+            scheduler = get_cosine_schedule_with_warmup(optimizer, num_warmup_steps=new_warmup, num_training_steps=new_total_steps)
+
     model, optimizer, train_loader, scheduler = accelerator.prepare(model, optimizer, train_loader, scheduler)
+    unwrapped_model = accelerator.unwrap_model(model)
+    if hasattr(ema_model, 'module'):
+        ema_model.module.load_state_dict(unwrapped_model.state_dict())
+    else:
+        ema_model.load_state_dict(unwrapped_model.state_dict())
        
     if sys.platform.startswith('linux'):
         try:
@@ -187,58 +226,70 @@ def train():
     logger = CSVLogger(Config.log_file, resume=(Config.resume_from is not None))
 
     for epoch in range(start_epoch, Config.epochs):
+        display_epoch = epoch + 1
+        
         pbar = tqdm(train_loader, disable=not accelerator.is_main_process)
         optimizer.zero_grad()   
             
         for step, batch in enumerate(pbar):
-            x_t, t, x_1, target, text = prepare_batch_and_targets(batch, Config.device, Config.dtype, Config.shift_val, Config.offset_noise)
-            
-            with accelerator.autocast():
-                loss = calculate_total_loss(model, ema_model, x_t, t, x_1, target, text, epoch, Config.epochs, 
-                                            Config.use_self_eval, Config.start_self_eval_at, Config.self_eval_lambda, 
-                                            Config.fal_lambda, Config.fcl_lambda, Config.loss_type, Config.accum_steps)
+            with accelerator.accumulate(model):
+                x_t, t, x_1, target, text, text_mask = prepare_batch_and_targets(batch, Config.device, torch.float32,
+                                                                                 Config.shift_val, Config.offset_noise)
+                with accelerator.autocast():
+                    loss = calculate_total_loss(model, ema_model, x_t, t, x_1, target, text, text_mask, epoch, 
+                                                Config.epochs, Config.use_self_eval, Config.start_self_eval_at, 
+                                                Config.self_eval_lambda, Config.fal_lambda, Config.fcl_lambda, 
+                                                Config.loss_type)
 
-            accelerator.backward(loss)
-            
-            if (step + 1) % Config.accum_steps == 0:
-                optimizer.step()
-                scheduler.step()
-                optimizer.zero_grad()
-                global_step += 1
+                accelerator.backward(loss)
                 
-                if accelerator.is_main_process:
+                if accelerator.sync_gradients:
+                    global_step += 1
+                    
                     ema_model.update_parameters(accelerator.unwrap_model(model))
-                
-                if global_step % LOG_EVERY_STEPS == 0:
-                    lr_curr = optimizer.param_groups[0]['lr']
-                    avg_g, min_g, max_g = get_gate_stats(model)      
-                    curr_loss = loss.item() * Config.accum_steps
                     
-                    pbar.set_description(f"Ep {epoch}|Step {global_step}|Loss: {curr_loss:.3f}")
+                    accelerator.clip_grad_norm_(model.parameters(), max_norm=1.0)
+                    optimizer.step()
+                    scheduler.step()
+                    optimizer.zero_grad()
                     
-                    if accelerator.is_main_process:
-                        logger.log(epoch, global_step, curr_loss, lr_curr, avg_g, min_g, max_g)
-                    
-                    accelerator.log({
-                        "train_loss": curr_loss,
-                        "learning_rate": lr_curr, 
-                        "gate_avg": avg_g,
-                        "epoch": epoch
-                    }, step=global_step)
+                    if global_step % LOG_EVERY_STEPS == 0:
+                        lr_current = optimizer.param_groups[0]['lr']
+                        avg_gate, min_gate, max_gate = get_gate_stats(model)      
+                        curr_loss = loss.item()
+                        self_eval_status = "On" if Config.use_self_eval and epoch > (Config.epochs * Config.start_self_eval_at) else "Off"
+                        
+                        pbar.set_description(f"Epoch {epoch}|Step {global_step}|Loss {curr_loss:.3f}|LR {lr_current:.6f}|FGate {avg_gate:.3f}[{min_gate:.3f}/{max_gate:.3f}]|SE {self_eval_status}")
+                        
+                        if accelerator.is_main_process:
+                            logger.log(epoch, global_step, curr_loss, lr_current, avg_gate, min_gate, max_gate)
+                        
+                        accelerator.log({
+                            "loss": curr_loss,
+                            "lr": lr_current, 
+                            "gate_avg": avg_gate,
+                            "gate_min": min_gate,
+                            "gate_max": max_gate,
+                            "epoch": epoch
+                        }, step=global_step)
 
-        if epoch > 0 and epoch % Config.validate_every == 0:
-            validate(accelerator, model, vae, epoch, global_step, is_ema=False)
-            validate(accelerator, ema_model.module, vae, epoch, global_step, is_ema=True)
+        if display_epoch > 0 and display_epoch % Config.validate_every == 0:
+            validate(accelerator, model, vae, display_epoch, global_step, is_ema=False)
+            validate(accelerator, ema_model.module, vae, display_epoch, global_step, is_ema=True)
             
-        if accelerator.is_main_process and epoch > 0 and epoch % Config.save_every == 0:
+        if accelerator.is_main_process and display_epoch > 0 and display_epoch % Config.save_every == 0:
             unwrapped = accelerator.unwrap_model(model)
-            save_path = f"{Config.checkpoint_dir}/full_state_epoch_{epoch}.pt"
-            torch.save({'epoch': epoch, 'global_step': global_step, 'model_state_dict': unwrapped.state_dict(),
-                        'ema_state_dict': ema_model.module.state_dict(), 'optimizer_state_dict': optimizer.state_dict(),
-                        'scheduler_state_dict': scheduler.state_dict()}, save_path)
-            cleanup_checkpoints(Config.checkpoint_dir, "full_state_", keep_last_n=1)
+            checkpoint_manager.save(display_epoch, global_step, unwrapped, ema_model, optimizer, scheduler, wandb_run_id)
+
+    if accelerator.is_main_process:
+            print("Training complete. Saving final checkpoint...")
+            unwrapped = accelerator.unwrap_model(model)
+            checkpoint_manager.save(Config.epochs, global_step, unwrapped, ema_model, optimizer, scheduler, wandb_run_id, is_final=True)
 
     accelerator.end_training()
            
 if __name__ == "__main__":
+    start_time = time.time()
     train()
+    final_time = time.time() - start_time
+    print(f"Total time in minutes: {final_time / 60:.2f}")

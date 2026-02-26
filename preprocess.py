@@ -10,6 +10,7 @@ from diffusers import AutoencoderKL
 from diffusers.models import AutoencoderKL as DiffusersAutoencoderKL
 from tqdm import tqdm
 from config import Config
+from model_loader import load_vae
 
 def generate_buckets(target_res, stride=32):
     area = target_res * target_res
@@ -37,18 +38,12 @@ def get_best_bucket(w, h):
 
 def setup_models():
     print(f"Loading VAE: {Config.vae_id}...")
-    vae = None  
-    if "FLUX.2" in Config.vae_id:
-        print("Loading FLUX2 VAE...")
-        vae = DiffusersAutoencoderKL.from_pretrained(Config.vae_id).to(Config.device).eval()
-    else:
-        print("Loading generic VAE...")
-        vae = AutoencoderKL.from_pretrained(Config.vae_id).to(Config.device).eval()
+    vae = load_vae()
     print(f"Loading Text Encoder: {Config.text_model_id}...")
     tokenizer = AutoTokenizer.from_pretrained(Config.text_model_id)
     full_model = AutoModel.from_pretrained(Config.text_model_id, trust_remote_code=True)
     text_model = full_model.encoder if hasattr(full_model, "encoder") else full_model
-    text_model.to(Config.device).eval()
+    text_model.to(Config.device, dtype=Config.dtype).eval()
     return vae, tokenizer, text_model
 
 def process():
@@ -81,8 +76,9 @@ def process():
             
             bw, bh = get_best_bucket(img_w, img_h)
             
-            bw = min(bw, (img_w // stride) * stride)
-            bh = min(bh, (img_h // stride) * stride)
+            if Config.dynamic_buckets:
+                bw = min(bw, (img_w // stride) * stride)
+                bh = min(bh, (img_h // stride) * stride)
             
             bw = max(stride, bw)
             bh = max(stride, bh)
@@ -109,13 +105,13 @@ def process():
             img_tensor = TF.normalize(img_tensor, [0.5], [0.5])
 
             with torch.no_grad():
-                latents = vae.encode(img_tensor).latent_dist.sample()
-                latents = latents * Config.vae_scaling_factor 
+                latents = vae.encode(img_tensor).latent_dist.mode()
 
             with open(txt_path, 'r', encoding='utf-8') as f:
                 prompt = f.read().strip()
             
             inputs = tokenizer(prompt, max_length=Config.max_token_length, padding="max_length", truncation=True, return_tensors="pt").to(Config.device)
+            text_attention_mask = inputs.attention_mask.squeeze(0).cpu().bool()
             with torch.no_grad():
                 outputs = text_model(input_ids=inputs.input_ids, attention_mask=inputs.attention_mask)
                 text_embeds = outputs.last_hidden_state if hasattr(outputs, "last_hidden_state") else outputs[0]
@@ -123,6 +119,7 @@ def process():
             save_data = {
                 "latents": latents.squeeze(0).cpu().to(dtype=Config.dtype),
                 "text_embeds": text_embeds.squeeze(0).cpu().to(dtype=Config.dtype),
+                "attention_mask": text_attention_mask,
                 "width": bw,
                 "height": bh
             }

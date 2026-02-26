@@ -11,11 +11,13 @@ class Rope3D(nn.Module):
         super().__init__()
         self.head_dim = head_dim
         self.theta = theta
-        
-        self.dim_0 = head_dim // 4
-        self.dim_1 = (head_dim - self.dim_0) // 2
+       
+        self.dim_0 = (head_dim // 4) // 2 * 2
+        rem = head_dim - self.dim_0
+        self.dim_1 = (rem // 2) // 2 * 2
         self.dim_2 = head_dim - self.dim_0 - self.dim_1
-        
+       
+        assert self.dim_0 % 2 == 0 and self.dim_1 % 2 == 0 and self.dim_2 % 2 == 0
         assert self.dim_0 + self.dim_1 + self.dim_2 == head_dim
 
     def forward(self, seq_len_text, h, w, device):
@@ -34,7 +36,7 @@ class Rope3D(nn.Module):
         grid = torch.cat([grid_text, grid_img], dim=0)
         
         def get_freqs(dim, positions):
-            inv_freq = 1.0 / (self.theta ** (torch.arange(0, dim, 2, device=device).float() / dim))
+            inv_freq = 1.0 / (self.theta ** (torch.arange(0, dim, 2, device=positions.device).float() / dim))
             freqs = torch.outer(positions, inv_freq)
             return torch.cat([freqs.cos(), freqs.sin()], dim=-1)
 
@@ -47,26 +49,29 @@ class Rope3D(nn.Module):
 def apply_rope_3d(x, freqs_0, freqs_1, freqs_2):
     d0 = freqs_0.shape[-1]
     d1 = freqs_1.shape[-1]
-    
+   
     x0 = x[..., :d0]
     x1 = x[..., d0 : d0+d1]
     x2 = x[..., d0+d1:]
-    
-    def rotate_half(x, f):
+   
+    def rotate(x_chunk, f):
         f = f.unsqueeze(0).unsqueeze(2)
-        
-        x1 = x[..., 0::2]
-        x2 = x[..., 1::2]
-        c = f[..., 0::2]
-        s = f[..., 1::2]
-        
-        res = torch.cat([x1 * c - x2 * s, x1 * s + x2 * c], dim=-1)
-        return res
-
-    x0 = rotate_half(x0, freqs_0)
-    x1 = rotate_half(x1, freqs_1)
-    x2 = rotate_half(x2, freqs_2)
-    
+        half = f.shape[-1] // 2
+        cos = f[..., :half].to(x_chunk.dtype)
+        sin = f[..., half:].to(x_chunk.dtype)
+       
+        x_even = x_chunk[..., ::2]
+        x_odd  = x_chunk[..., 1::2]
+       
+        x_rot_even = x_even * cos - x_odd * sin
+        x_rot_odd  = x_even * sin + x_odd * cos
+       
+        return torch.stack((x_rot_even, x_rot_odd), dim=-1).reshape(x_chunk.shape)
+   
+    x0 = rotate(x0, freqs_0)
+    x1 = rotate(x1, freqs_1)
+    x2 = rotate(x2, freqs_2)
+   
     return torch.cat([x0, x1, x2], dim=-1)
 
 class RMSNorm(nn.Module):
@@ -76,9 +81,10 @@ class RMSNorm(nn.Module):
         self.weight = nn.Parameter(torch.ones(dim))
 
     def forward(self, x):
-        var = torch.mean(x ** 2, dim=-1, keepdim=True)
-        x_norm = x * torch.rsqrt(var + self.eps)
-        return self.weight * x_norm
+        x_float = x.float()
+        var = torch.mean(x_float ** 2, dim=-1, keepdim=True)
+        x_norm = x_float * torch.rsqrt(var + self.eps)
+        return self.weight * x_norm.to(x.dtype)
 
 class SwiGLU(nn.Module):
     def __init__(self, dim, hidden_dim, multiple_of=256):
@@ -184,7 +190,7 @@ class FourierFilter(nn.Module):
         x_out = x_out.permute(0, 2, 3, 1).reshape(B, L, C)
         
         # 12. Gating
-        return x_out.to(dtype) * torch.tanh(self.gate)
+        return x_out.to(dtype) * torch.tanh(self.gate).to(dtype)
 
 class VisualFusionBlock(nn.Module):
     def __init__(self, hidden_size, num_heads, dropout=0.0, use_fourier=True):
@@ -218,8 +224,11 @@ class VisualFusionBlock(nn.Module):
         
         self.dropout = nn.Dropout(dropout)
 
-    def forward(self, x, c, f0, f1, f2, img_h=None, img_w=None):
+    def forward(self, x, c, f0, f1, f2, img_h=None, img_w=None, attend_mask=None):
         B, N, C = x.shape
+        
+        if attend_mask is None:
+            attend_mask = torch.ones(B, N, dtype=torch.bool, device=x.device)
         
         shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp = self.adaLN_modulation(c).chunk(6, dim=1)
         
@@ -243,7 +252,8 @@ class VisualFusionBlock(nn.Module):
         q = q.transpose(1, 2)
         k = k.transpose(1, 2)
         
-        attn = F.scaled_dot_product_attention(q, k, v)
+        attn_mask = attend_mask.unsqueeze(1).unsqueeze(2)
+        attn = F.scaled_dot_product_attention(q, k, v, attn_mask=attn_mask)
         attn = attn.transpose(1, 2).reshape(B, N, C)
         
         x = x + gate_msa.unsqueeze(1) * self.dropout(self.attention_out(attn))
@@ -284,8 +294,12 @@ class ContextRefinerBlock(nn.Module):
         self.attention_out = nn.Linear(hidden_size, hidden_size, bias=False)
         self.feed_forward = SwiGLU(hidden_size, hidden_size * 4)
 
-    def forward(self, x, f0, f1, f2):
+    def forward(self, x, f0, f1, f2, attend_mask=None):
         B, N, C = x.shape
+        
+        if attend_mask is None:
+            attend_mask = torch.ones(B, N, dtype=torch.bool, device=x.device)
+        
         x_norm = self.attention_norm1(x)
         
         q = self.attention_q(x_norm).reshape(B, N, self.num_heads, self.head_dim).permute(0, 2, 1, 3)
@@ -305,7 +319,8 @@ class ContextRefinerBlock(nn.Module):
         q = q.transpose(1, 2)
         k = k.transpose(1, 2)
         
-        attn = F.scaled_dot_product_attention(q, k, v)
+        attn_mask = attend_mask.unsqueeze(1).unsqueeze(2)
+        attn = F.scaled_dot_product_attention(q, k, v, attn_mask=attn_mask)
         attn = attn.transpose(1, 2).reshape(B, N, C)
         
         x = x + self.attention_out(attn)
@@ -345,9 +360,8 @@ class SingleStreamDiT(nn.Module):
             nn.Linear(text_embed_dim, hidden_size, bias=True)
         )
         
-        self.text_pos_embed = nn.Parameter(torch.zeros(1, max_token_length, hidden_size))
-        self.x_pad_token = nn.Parameter(torch.zeros(1, 1, hidden_size))
         self.cap_pad_token = nn.Parameter(torch.zeros(1, 1, hidden_size))
+        self.text_pos_embed = nn.Parameter(torch.zeros(1, max_token_length, hidden_size))
         
         self.t_embedder = nn.Sequential(
             nn.Linear(256, hidden_size), 
@@ -386,7 +400,7 @@ class SingleStreamDiT(nn.Module):
         
         self.initialize_weights()
 
-    def forward(self, x, t, text_embeds):
+    def forward(self, x, t, text_embeds, text_mask=None):
         B, C, H, W = x.shape
         p = self.patch_size
         grid_h, grid_w = H // p, W // p
@@ -397,13 +411,18 @@ class SingleStreamDiT(nn.Module):
         
         is_null = (text_embeds.abs().sum(dim=(1, 2)) == 0)
         context = self.cap_embedder(text_embeds)
+        
+        seq_len_text = context.shape[1]
+        if text_mask is None:
+            text_mask = torch.ones(B, seq_len_text, dtype=torch.bool, device=x.device)
+        
         if is_null.any():
             null_mask = is_null.view(-1, 1, 1)
             context = torch.where(null_mask, self.cap_pad_token.expand_as(context), context)
-            
-        seq_len_text = context.shape[1]
-        
         context = context + self.text_pos_embed[:, :seq_len_text, :]
+        
+        img_len = grid_h * grid_w
+        full_mask = torch.cat([text_mask, torch.ones(B, img_len, dtype=torch.bool, device=x.device)], dim=1)
         
         t_freq = self.timestep_embedding(t, 256)
         t_emb = self.t_embedder(t_freq.to(x.dtype))
@@ -424,18 +443,18 @@ class SingleStreamDiT(nn.Module):
                 
         for block in self.context_refiner:
              if self.gradient_checkpointing:
-                context = checkpoint(block, context, f0_txt, f1_txt, f2_txt, use_reentrant=False)
+                context = checkpoint(block, context, f0_txt, f1_txt, f2_txt, text_mask, use_reentrant=False)
              else:
-                context = block(context, f0_txt, f1_txt, f2_txt)
+                context = block(context, f0_txt, f1_txt, f2_txt, attend_mask=text_mask)
                 
         # 4. Fusion
         x_concat = torch.cat([context, x], dim=1)
         
         for block in self.blocks:
             if self.gradient_checkpointing:
-                x_concat = checkpoint(block, x_concat, t_emb, f0, f1, f2, grid_h, grid_w, use_reentrant=False)
+                x_concat = checkpoint(block, x_concat, t_emb, f0, f1, f2, grid_h, grid_w, full_mask, use_reentrant=False)
             else:
-                x_concat = block(x_concat, t_emb, f0, f1, f2, img_h=grid_h, img_w=grid_w)
+                x_concat = block(x_concat, t_emb, f0, f1, f2, img_h=grid_h, img_w=grid_w, attend_mask=full_mask)
                 
         # 5. Output
         img_token_len = grid_h * grid_w
@@ -487,7 +506,6 @@ class SingleStreamDiT(nn.Module):
         nn.init.constant_(self.final_layer.weight, 0)
         nn.init.constant_(self.final_layer.bias, 0)
         
-        nn.init.normal_(self.x_pad_token, std=0.02)
         nn.init.normal_(self.cap_pad_token, std=0.02)
         nn.init.normal_(self.text_pos_embed, std=0.02)
         
@@ -502,5 +520,7 @@ class SingleStreamDiT(nn.Module):
                 nn.init.xavier_uniform_(module.w3.weight)
                 
         for module in [self.noise_refiner, self.context_refiner, self.blocks]:
-            for p in module.parameters():
-                if p.dim() > 1: nn.init.normal_(p, std=0.02)
+            for name, p in module.named_parameters():
+                if p.dim() > 1 and "SwiGLU" not in name:
+                    if "q" in name or "k" in name or "v" in name or "out" in name:
+                        nn.init.normal_(p, std=0.02)

@@ -1,29 +1,25 @@
 import torch
 import os
 import sys
-from diffusers import AutoencoderKL
 from PIL import Image
+
 # Import config and latents from the folder above.
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 sys.path.append(ROOT)
 os.chdir(ROOT)
 from config import Config
 from latents import denormalize_latents, to_vae_space
-
-DEVICE = Config.device
-DTYPE = Config.dtype
-VAE_ID = Config.vae_id
-TARGET_FILE = Config.target_file
+from model_loader import load_vae
 
 def check_pipeline():
     print(f"--- DEBUGGING PIPELINE (Forced Float32 VAE) ---")
-    print(f"Target File: {TARGET_FILE}")
+    print(f"Target File: {Config.target_file}")
     print(f"Config Mean: {Config.dataset_mean}")
     print(f"Config Std:  {Config.dataset_std}")
     print(f"VAE Scaling: {Config.vae_scaling_factor}")
     
-    data = torch.load(TARGET_FILE, map_location=DEVICE)
-    latents = data["latents"].to(torch.float32).unsqueeze(0) # [1, 16, H, W]
+    data = torch.load(Config.target_file, map_location=Config.device)
+    latents = data["latents"].to(torch.float32).unsqueeze(0)
     
     latents = latents.float()
     
@@ -34,7 +30,7 @@ def check_pipeline():
     latents = to_vae_space(latents)
 
     print("Loading VAE (Float32)...")
-    vae = AutoencoderKL.from_pretrained(VAE_ID).to(DEVICE, dtype=torch.float32).eval()
+    vae = load_vae()
     
     print("Decoding...")
     with torch.no_grad():
