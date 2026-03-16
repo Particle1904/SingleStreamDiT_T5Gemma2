@@ -55,7 +55,7 @@ class Config:
     in_channels = 32    
 
     # DiT backbone
-    hidden_size = 1152
+    hidden_size = 768
     num_heads = 12
     depth = 12
     # Separate refinement stages
@@ -106,12 +106,12 @@ class Config:
     # ============================================================
     # Base learning rate (AdamW / 8-bit Adam)
     # 1e-4 or 2e-4 for fresh/aggressive and 4e-5 or 5e-5 for fine-tuning
-    learning_rate = 2e-4
+    learning_rate = 1e-4
     # Total number of epochs (from scratch or resumed)
-    epochs = 2000
+    epochs = 1400
     # Effective batch size per optimizer step
-    batch_size = 16
-    accum_steps = 1
+    batch_size = 8
+    accum_steps = 4
     dynamic_buckets = False
     # Loss for velocity prediction
     # Options: "mse", "l1", "huber"
@@ -157,9 +157,9 @@ class Config:
     # ============================================================
     # REGION:  FOURIER LOSSES & LAYERS
     # Fourier Amplitude Loss lambda
-    fal_lambda = 0.0
+    fal_lambda = 0.5
     # Fourier Correlation Loss lambda
-    fcl_lambda = 0.0
+    fcl_lambda = 0.5
     # Set to false to disable the 2 fourier filters in refiner layers
     use_fourier_filters_in_refiner = True 
     # Set to 0 to disable the final stack
@@ -200,6 +200,8 @@ class Config:
     push_to_hub = True  # Set to True to enable HF uploads
     hf_repo_id = "Crowlley/SingleStreamDiT-T5Gemma2" 
     hf_token = os.environ.get("HF_TOKEN")
+    
+    compile_model = False
     
 def parse_config_args():
     parser = argparse.ArgumentParser(description="Override Config parameters")

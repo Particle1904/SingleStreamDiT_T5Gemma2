@@ -115,7 +115,7 @@ def process():
             with torch.no_grad():
                 outputs = text_model(input_ids=inputs.input_ids, attention_mask=inputs.attention_mask)
                 text_embeds = outputs.last_hidden_state if hasattr(outputs, "last_hidden_state") else outputs[0]
-
+            
             save_data = {
                 "latents": latents.squeeze(0).cpu().to(dtype=Config.dtype),
                 "text_embeds": text_embeds.squeeze(0).cpu().to(dtype=Config.dtype),

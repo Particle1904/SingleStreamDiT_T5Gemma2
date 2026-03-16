@@ -49,8 +49,7 @@ def sanity():
         return
     
     print(f"Loading {Config.target_file}...")
-    data = torch.load(Config.target_file)
-    
+    data = torch.load(Config.target_file)    
     latents = data["latents"].unsqueeze(0).to(DEVICE, Config.dtype)
     
     text = data["text_embeds"].unsqueeze(0).to(DEVICE, Config.dtype)

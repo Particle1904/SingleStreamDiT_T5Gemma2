@@ -397,7 +397,7 @@ class SingleStreamDiT(nn.Module):
                 
         self.final_norm = RMSNorm(hidden_size)
         self.final_layer = nn.Linear(hidden_size, patch_dim)
-        
+                
         self.initialize_weights()
 
     def forward(self, x, t, text_embeds, text_mask=None):
@@ -450,12 +450,12 @@ class SingleStreamDiT(nn.Module):
         # 4. Fusion
         x_concat = torch.cat([context, x], dim=1)
         
-        for block in self.blocks:
+        for i, block in enumerate(self.blocks):
             if self.gradient_checkpointing:
                 x_concat = checkpoint(block, x_concat, t_emb, f0, f1, f2, grid_h, grid_w, full_mask, use_reentrant=False)
             else:
                 x_concat = block(x_concat, t_emb, f0, f1, f2, img_h=grid_h, img_w=grid_w, attend_mask=full_mask)
-                
+            
         # 5. Output
         img_token_len = grid_h * grid_w
         x_out = x_concat[:, -img_token_len:, :]

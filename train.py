@@ -103,7 +103,8 @@ def validate(accelerator, model, vae, epoch, global_step, is_ema=False):
     accelerator.get_tracker("wandb").log({key_name: wandb.Image(image)}, step=global_step)
     
     image.save(f"{Config.samples_dir}/{'EMA_' if is_ema else 'RAW_'}epoch_{epoch}.png")
-    model.train()
+    if not is_ema:
+        model.train()
 
 def train():
     checkpoint_manager = CheckpointManager(Config)
@@ -152,6 +153,7 @@ def train():
     
     model.initialize_weights()
     ema_model = AveragedModel(model, multi_avg_fn=get_ema_multi_avg_fn(Config.ema_decay))
+    ema_model.requires_grad_(False)
     
     full_dataset = TextImageDataset()
     train_idx_set = set(range(len(full_dataset)))
@@ -188,12 +190,14 @@ def train():
     start_epoch = 0
     global_step = 0
     
+    resumed = False
     if can_attempt_resume(Config.resume_from):
         resolved_path = checkpoint_manager._resolve_path(Config.resume_from)
         if resolved_path is not None:
             opt_ref = None if Config.reset_optimizer else optimizer
             sched_ref = None if Config.reset_optimizer else scheduler
             start_epoch, global_step = checkpoint_manager.load(resolved_path, model, ema_model, opt_ref, sched_ref)
+            resumed = True
             if Config.reset_optimizer:
                 print(f"Resetting Scheduler for remaining epochs: {Config.epochs - start_epoch}")
         else:
@@ -210,15 +214,15 @@ def train():
             
             scheduler = get_cosine_schedule_with_warmup(optimizer, num_warmup_steps=new_warmup, num_training_steps=new_total_steps)
 
-    model, optimizer, train_loader, scheduler = accelerator.prepare(model, optimizer, train_loader, scheduler)
+    model, optimizer, scheduler = accelerator.prepare(model, optimizer, scheduler)
     unwrapped_model = accelerator.unwrap_model(model)
-    if not (can_attempt_resume(Config.resume_from) and resolved_path is not None):
+    if not resumed:
         if hasattr(ema_model, 'module'):
             ema_model.module.load_state_dict(unwrapped_model.state_dict())
         else:
             ema_model.load_state_dict(unwrapped_model.state_dict())
        
-    if sys.platform.startswith('linux'):
+    if sys.platform.startswith('linux') and Config.compile_model:
         try:
             model = torch.compile(model, mode="max-autotune")
         except: 
@@ -230,12 +234,11 @@ def train():
         display_epoch = epoch + 1
         
         pbar = tqdm(train_loader, disable=not accelerator.is_main_process)
-        optimizer.zero_grad()   
-            
         for step, batch in enumerate(pbar):
             with accelerator.accumulate(model):
                 x_t, t, x_1, target, text, text_mask = prepare_batch_and_targets(batch, Config.device, torch.float32,
                                                                                  Config.shift_val, Config.offset_noise)
+                
                 with accelerator.autocast():
                     loss = calculate_total_loss(model, ema_model, x_t, t, x_1, target, text, text_mask, epoch, 
                                                 Config.epochs, Config.use_self_eval, Config.start_self_eval_at, 
@@ -243,11 +246,9 @@ def train():
                                                 Config.loss_type)
 
                 accelerator.backward(loss)
-                
+                                
                 if accelerator.sync_gradients:
                     global_step += 1
-                    
-                    
                     accelerator.clip_grad_norm_(model.parameters(), max_norm=1.0)
                     optimizer.step()
                     scheduler.step()
