@@ -6,10 +6,11 @@ def parse_run_name(learning_rate=None):
     d = f"d_{Config.depth}"
     rd = f"rd_{Config.refiner_depth}"
     ps = f"ps_{Config.patch_size}"
-    fsd = f"fsd_{Config.fourier_stack_depth}"
+    lt = f"lt_{Config.loss_type}"
     lr = f"lr_{learning_rate}" if learning_rate is not None else f"lr_{Config.learning_rate}"
+    sv = f"sv_{Config.shift_val}"
     te = f"te_{get_text_encoder_name()}"
-    run_name = f"{hs}-{nh}-{d}-{rd}-{ps}-{fsd}-{lr}-{te}"
+    run_name = f"{hs}-{nh}-{d}-{rd}-{ps}-{lt}-{lr}-{sv}-{te}"
     return run_name
 
 def get_text_encoder_name():

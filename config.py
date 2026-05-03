@@ -114,8 +114,8 @@ class Config:
     accum_steps = 4
     dynamic_buckets = False
     # Loss for velocity prediction
-    # Options: "mse", "l1", "huber"
-    loss_type = "mse"
+    # Options: "mse", "l1", "huber". "edm"
+    loss_type = "edm"
     
     # Transformer regularization
     model_dropout = 0.05
@@ -141,7 +141,7 @@ class Config:
     # REGION: FLOW MATCHING & SAMPLING
     # Time parameterization and numerical integration
     # ============================================================
-    shift_val = 1.0        
+    shift_val = 3.0        
     
     # ============================================================
     # REGION: SELF-Evaluation (EXPERIMENTAL)
@@ -155,15 +155,11 @@ class Config:
     self_eval_lambda = 0.3
     
     # ============================================================
-    # REGION:  FOURIER LOSSES & LAYERS
+    # REGION: FOURIER LOSSES
     # Fourier Amplitude Loss lambda
     fal_lambda = 0.5
     # Fourier Correlation Loss lambda
     fcl_lambda = 0.5
-    # Set to false to disable the 2 fourier filters in refiner layers
-    use_fourier_filters_in_refiner = True 
-    # Set to 0 to disable the final stack
-    fourier_stack_depth = 2
         
     # ============================================================
     # REGION: SYSTEM & DATALOADING

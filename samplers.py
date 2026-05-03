@@ -33,23 +33,19 @@ def cfg_guided_position(model, x, t, text_embeds, cfg=1.0, text_mask=None):
 
 def run_sampling_pipeline(model, initial_noise, steps, combined_text_embeds, cfg, sampler_type, shift_val, text_mask=None):
     x = initial_noise.clone()
-    dt = 1.0 / steps
-
-    combined_text = combined_text_embeds 
+    indices = torch.linspace(0, steps, steps + 1, device=initial_noise.device)
+    timesteps = get_1d_shifted_time(indices / steps, shift_val)
     
     for i in range(steps):
-        t_linear = torch.tensor([i / steps], device=x.device, dtype=x.dtype)
-        t = get_1d_shifted_time(t_linear, shift_val)
+        t = timesteps[i].view(-1) 
+        t_next = timesteps[i+1].view(-1)
+        dt = t_next - t
 
         if sampler_type == "euler":
-            x = euler_step(model, x, t, dt, combined_text, cfg, text_mask)                
+            x = euler_step(model, x, t, dt, combined_text_embeds, cfg, text_mask)                
         elif sampler_type == "rk4":
-            t_mid_linear = torch.tensor([(i + 0.5) / steps], device=x.device, dtype=x.dtype)
-            t_mid = get_1d_shifted_time(t_mid_linear, shift_val)
-            
-            t_end_linear = torch.tensor([(i + 1.0) / steps], device=x.device, dtype=x.dtype)
-            t_end = get_1d_shifted_time(t_end_linear, shift_val)
-            x = rk4_step(model, x, t, dt, combined_text, cfg, t_mid, t_end, text_mask)
+            t_mid = (t + t_next) / 2.0
+            x = rk4_step(model, x, t, dt, combined_text_embeds, cfg, t_mid, t_next, text_mask)
         else:
             raise ValueError(f"Unknown sampler: {sampler_type}")
             

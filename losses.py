@@ -3,12 +3,19 @@ import math
 import torch.nn.functional as F
 from samplers import cfg_guided_position, predict_x1_from_velocity, get_1d_shifted_time  
 
-def prepare_batch_and_targets(batch, device, dtype, shift_val, offset_noise):
+def prepare_batch_and_targets(batch, device, dtype, shift_val, offset_noise, loss_type):
     x_1 = batch["latents"].to(device, dtype=dtype)
     text = batch["text_embeds"].to(device, dtype=dtype)
     text_mask = batch["text_mask"].to(device)
     
-    u = torch.rand(x_1.shape[0], device=device, dtype=dtype)
+    u = 0
+    if loss_type == "edm":
+        loc, scale = -1.2, 1.2
+        u = torch.randn(x_1.shape[0], device=device, dtype=dtype) * scale + loc
+        u = torch.sigmoid(u) 
+    else:
+        u = torch.rand(x_1.shape[0], device=device, dtype=dtype)
+    
     t = get_1d_shifted_time(u, shift_val)            
     x_0 = torch.randn_like(x_1)
     x_0 = x_0 + offset_noise * torch.randn(x_1.shape[0], x_1.shape[1], 1, 1, device=device, dtype=dtype)            
@@ -66,6 +73,13 @@ def get_fourier_correlation_loss(x_hat_1, x_1, t, fcl_lambda=0.05):
 
     return fcl_lambda * loss_fcl
 
+def get_edm_loss(v_pred, target, t):
+    t_sq = t.pow(2)
+    weight = (t_sq + 1.0) / (t_sq * 1.0) 
+    weight = weight.clamp(max=100.0) 
+    loss = F.mse_loss(v_pred, target, reduction='none')
+    return (loss * weight.view(-1, 1, 1, 1)).mean()
+
 def get_self_eval_loss(x_hat_1, x_1, t, s, ema_model, text, text_mask, self_eval_lambda, cfg_val=1.5):
     with torch.no_grad():
         noise_s = torch.randn_like(x_hat_1)
@@ -100,8 +114,12 @@ def calculate_total_loss(model, ema_model, x_t, t, x_1, target, text, text_mask,
                          start_self_eval_at, self_eval_lambda, fal_lambda, fcl_lambda, loss_type):
     v_pred = model(x_t, t, text, text_mask)
     
-    loss_real = get_base_loss(v_pred, target, loss_type)
-    
+    loss_real = 0
+    if loss_type == "edm":
+        loss_real = get_edm_loss(v_pred, target, t)
+    else:
+        loss_real = get_base_loss(v_pred, target, loss_type)
+        
     loss_fal = 0.0
     loss_fcl = 0.0
     x_hat_1 = None 

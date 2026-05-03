@@ -34,7 +34,6 @@ torch.backends.cuda.matmul.allow_tf32 = True
 torch.backends.cudnn.allow_tf32 = True
 torch.backends.cudnn.benchmark = True 
 
-GATE_LEARNING_RATE_MULTIPLIER = 1
 LOG_EVERY_STEPS = 1 
 
 parse_config_args()
@@ -50,23 +49,15 @@ def can_attempt_resume(resume_value):
         return True
     return os.path.exists(resume_value)
 
-def get_gate_stats(model):
-    m = model.module if hasattr(model, "module") else model
-    gate_values = [module.gate.item() for _, module in m.named_modules() 
-                   if hasattr(module, "gate") and isinstance(module.gate, torch.nn.Parameter)]
-    if not gate_values: 
-        return 0.0, 0.0, 0.0
-    return sum(gate_values)/len(gate_values), min(gate_values), max(gate_values)
-
 class CSVLogger:
     def __init__(self, filepath, resume=False):
         self.filepath = filepath
         if not os.path.exists(filepath) or not resume:
             with open(filepath, "w", newline="") as f:
-                csv.writer(f).writerow(["Epoch", "Global_Step", "Loss", "LR", "Gate_Avg", "Gate_Min", "Gate_Max"])
-    def log(self, epoch, step, loss, lr, gate_avg, gate_min, gate_max):
+                csv.writer(f).writerow(["Epoch", "Global_Step", "Loss", "LR"])
+    def log(self, epoch, step, loss, lr):
         with open(self.filepath, "a", newline="") as f:
-            csv.writer(f).writerow([epoch, step, loss, lr, gate_avg, gate_min, gate_max])
+            csv.writer(f).writerow([epoch, step, loss, lr])
 
 @torch.no_grad()
 def validate(accelerator, model, vae, epoch, global_step, is_ema=False):
@@ -178,12 +169,7 @@ def train():
     total_steps = steps_per_epoch * Config.epochs
     warmup_steps = int(total_steps * Config.optimizer_warmup)
 
-    param_base = [p for n, p in model.named_parameters() if 'fourier_filter.gate' not in n]
-    param_gates = [p for n, p in model.named_parameters() if 'fourier_filter.gate' in n]
-    optimizer = bnb.optim.AdamW8bit([
-        {'params': param_base, 'lr': Config.learning_rate, 'weight_decay': Config.weight_decay},
-        {'params': param_gates, 'lr': Config.learning_rate * GATE_LEARNING_RATE_MULTIPLIER, 'weight_decay': 0.0},
-    ], lr=Config.learning_rate) 
+    optimizer = bnb.optim.AdamW8bit(model.parameters(), lr=Config.learning_rate, weight_decay=Config.weight_decay)
     
     scheduler = get_cosine_schedule_with_warmup(optimizer, num_warmup_steps=warmup_steps, num_training_steps=total_steps)
     
@@ -237,7 +223,8 @@ def train():
         for step, batch in enumerate(pbar):
             with accelerator.accumulate(model):
                 x_t, t, x_1, target, text, text_mask = prepare_batch_and_targets(batch, Config.device, torch.float32,
-                                                                                 Config.shift_val, Config.offset_noise)
+                                                                                 Config.shift_val, Config.offset_noise,
+                                                                                 Config.loss_type)
                 
                 with accelerator.autocast():
                     loss = calculate_total_loss(model, ema_model, x_t, t, x_1, target, text, text_mask, epoch, 
@@ -257,21 +244,17 @@ def train():
                                         
                     if global_step % LOG_EVERY_STEPS == 0:
                         lr_current = optimizer.param_groups[0]['lr']
-                        avg_gate, min_gate, max_gate = get_gate_stats(model)      
                         curr_loss = loss.item()
                         self_eval_status = "On" if Config.use_self_eval and epoch > (Config.epochs * Config.start_self_eval_at) else "Off"
                         
-                        pbar.set_description(f"Epoch {epoch}|Step {global_step}|Loss {curr_loss:.3f}|LR {lr_current:.6f}|FGate {avg_gate:.3f}[{min_gate:.3f}/{max_gate:.3f}]|SE {self_eval_status}")
+                        pbar.set_description(f"Epoch {epoch}|Step {global_step}|Loss {curr_loss:.3f}|Loss {Config.loss_type}|LR {lr_current:.6f}|SE {self_eval_status}")
                         
                         if accelerator.is_main_process:
-                            logger.log(epoch, global_step, curr_loss, lr_current, avg_gate, min_gate, max_gate)
+                            logger.log(epoch, global_step, curr_loss, lr_current)
                         
                         accelerator.log({
                             "loss": curr_loss,
                             "lr": lr_current, 
-                            "gate_avg": avg_gate,
-                            "gate_min": min_gate,
-                            "gate_max": max_gate,
                             "epoch": epoch
                         }, step=global_step)
 
