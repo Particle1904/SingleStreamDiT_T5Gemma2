@@ -49,8 +49,12 @@ def sanity():
     data = torch.load(Config.target_file)    
     latents = data["latents"].unsqueeze(0).to(DEVICE, Config.dtype)
     
-    text = data["text_embeds"].unsqueeze(0).to(DEVICE, Config.dtype)
-    text_mask = data["attention_mask"].unsqueeze(0).to(DEVICE)
+    if "text_embeds_list" in data:
+        text_embeds = data["text_embeds_list"][0].unsqueeze(0).to(Config.device, Config.dtype)
+        text_mask = data["attention_mask_list"][0].unsqueeze(0).to(Config.device)
+    else:
+        text_embeds = data["text_embeds"].unsqueeze(0).to(Config.device, Config.dtype)
+        text_mask = data["attention_mask"].unsqueeze(0).to(Config.device)
     
     h, w = data["height"], data["width"]
     
@@ -77,8 +81,8 @@ def sanity():
                                         w // Config.vae_downsample_factor, generator=torch_generator, device=DEVICE, 
                                         dtype=Config.dtype)
    
-            uncond_embeds = torch.zeros_like(text)
-            combined_text_embeds = torch.cat([uncond_embeds, text], dim=0)  
+            uncond_embeds = torch.zeros_like(text_embeds)
+            combined_text_embeds = torch.cat([uncond_embeds, text_embeds], dim=0)  
             combined_mask = torch.cat([text_mask, text_mask], dim=0)
                  
             x_euler = initial_noise.clone()
@@ -137,7 +141,7 @@ def sanity():
     for step in pbar:        
         batch_data = {
             "latents": latents, 
-            "text_embeds": text,
+            "text_embeds": text_embeds,
             "text_mask": text_mask
         }
         x_t, t, x_1, target, text_for_model, mask_for_model = prepare_batch_and_targets(batch_data, DEVICE, Config.dtype, 

@@ -120,11 +120,11 @@ class Config:
     
     # Transformer regularization
     model_dropout = 0.05
-    weight_decay = 0.05
+    weight_decay = 0.0
     optimizer_warmup = 0.05
     offset_noise = 0.05
     # Drop text conditioning during training (CFG support)    
-    text_dropout = 0.10
+    text_dropout = 0.0
     # Random horizontal flip in latent space
     flip_aug = False 
     

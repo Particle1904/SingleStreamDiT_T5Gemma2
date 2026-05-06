@@ -57,8 +57,15 @@ class TextImageDataset(Dataset):
             data = torch.load(self.files[idx], map_location="cpu")
 
         latents = data["latents"]
-        text = data["text_embeds"]
-        mask = data.get("attention_mask", torch.ones(text.shape[0], dtype=torch.bool))
+        if "text_embeds_list" in data:
+            num_captions = data["text_embeds_list"].shape[0]
+            choice_idx = random.randint(0, num_captions - 1) 
+            
+            text = data["text_embeds_list"][choice_idx]
+            mask = data["attention_mask_list"][choice_idx]
+        else:
+            text = data["text_embeds"]
+            mask = data.get("attention_mask", torch.ones(text.shape[0], dtype=torch.bool))
         
         latents = normalize_latents(latents)
         

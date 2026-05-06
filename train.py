@@ -69,8 +69,12 @@ def validate(accelerator, model, vae, epoch, global_step, is_ema=False):
 
     data = torch.load(Config.target_file, map_location="cpu")
     h, w = data["height"], data["width"]    
-    text_embeds = data["text_embeds"].unsqueeze(0).to(Config.device, Config.dtype)
-    text_mask = data["attention_mask"].unsqueeze(0).to(Config.device)
+    if "text_embeds_list" in data:
+        text_embeds = data["text_embeds_list"][0].unsqueeze(0).to(Config.device, Config.dtype)
+        text_mask = data["attention_mask_list"][0].unsqueeze(0).to(Config.device)
+    else:
+        text_embeds = data["text_embeds"].unsqueeze(0).to(Config.device, Config.dtype)
+        text_mask = data["attention_mask"].unsqueeze(0).to(Config.device)
     uncond_embeds = torch.zeros_like(text_embeds)
     combined_text_embeds = torch.cat([uncond_embeds, text_embeds], dim=0)
     combined_mask = torch.cat([text_mask, text_mask], dim=0)

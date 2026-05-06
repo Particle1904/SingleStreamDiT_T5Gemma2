@@ -114,19 +114,48 @@ def process():
                 else:
                     latents = encoded[0]
 
-            with open(txt_path, 'r', encoding='utf-8') as f:
-                prompt = f.read().strip()
+            base_name = os.path.splitext(filename)[0]
             
-            inputs = tokenizer(prompt, max_length=Config.max_token_length, padding="max_length", truncation=True, return_tensors="pt").to(Config.device)
-            text_attention_mask = inputs.attention_mask.squeeze(0).cpu().bool()
-            with torch.no_grad():
-                outputs = text_model(input_ids=inputs.input_ids, attention_mask=inputs.attention_mask)
-                text_embeds = outputs.last_hidden_state if hasattr(outputs, "last_hidden_state") else outputs[0]
+            caption_files =[]
+            main_txt = os.path.join(Config.dataset_dir, f"{base_name}.txt")
+            if os.path.exists(main_txt):
+                caption_files.append(main_txt)
+                
+            for item in os.listdir(Config.dataset_dir):
+                sub_dir = os.path.join(Config.dataset_dir, item)
+                if os.path.isdir(sub_dir):
+                    sub_txt = os.path.join(sub_dir, f"{base_name}.txt")
+                    if os.path.exists(sub_txt):
+                        caption_files.append(sub_txt)
             
+            if not caption_files:
+                print(f"Warning: No captions found for {filename}, skipping.")
+                continue
+
+            embeds_list = []
+            masks_list =[]
+            
+            for cap_path in caption_files:
+                with open(cap_path, 'r', encoding='utf-8') as f:
+                    prompt = f.read().strip()
+                
+                inputs = tokenizer(prompt, max_length=Config.max_token_length, padding="max_length", truncation=True, return_tensors="pt").to(Config.device)
+                text_attention_mask = inputs.attention_mask.squeeze(0).cpu().bool()
+                
+                with torch.no_grad():
+                    outputs = text_model(input_ids=inputs.input_ids, attention_mask=inputs.attention_mask)
+                    text_embeds = outputs.last_hidden_state if hasattr(outputs, "last_hidden_state") else outputs[0]
+                    
+                embeds_list.append(text_embeds.squeeze(0).cpu().to(dtype=Config.dtype))
+                masks_list.append(text_attention_mask)
+            
+            stacked_embeds = torch.stack(embeds_list)
+            stacked_masks = torch.stack(masks_list)
+
             save_data = {
                 "latents": latents.squeeze(0).cpu().to(dtype=Config.dtype),
-                "text_embeds": text_embeds.squeeze(0).cpu().to(dtype=Config.dtype),
-                "attention_mask": text_attention_mask,
+                "text_embeds_list": stacked_embeds,
+                "attention_mask_list": stacked_masks,
                 "width": bw,
                 "height": bh
             }
