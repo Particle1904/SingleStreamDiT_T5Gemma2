@@ -105,7 +105,14 @@ def process():
             img_tensor = TF.normalize(img_tensor, [0.5], [0.5])
 
             with torch.no_grad():
-                latents = vae.encode(img_tensor).latent_dist.mode()
+                encoded = vae.encode(img_tensor)
+                # Handle standard AutoencoderKL (probabilistic) vs AutoencoderDC (deterministic)
+                if hasattr(encoded, "latent_dist"):
+                    latents = encoded.latent_dist.mode()
+                elif hasattr(encoded, "latents"):
+                    latents = encoded.latents
+                else:
+                    latents = encoded[0]
 
             with open(txt_path, 'r', encoding='utf-8') as f:
                 prompt = f.read().strip()

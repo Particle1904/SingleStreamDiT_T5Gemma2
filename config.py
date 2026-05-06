@@ -57,15 +57,16 @@ class Config:
     # DiT backbone
     hidden_size = 768
     num_heads = 12
-    depth = 12
+    depth = 16
     # Separate refinement stages
-    refiner_depth = 2
+    refiner_depth = 4
     # Max token length for text conditioning
     max_token_length = 256
     # Patch size in latent space (latent pixels per token)
     patch_size = 2
     # Rotary embedding base
     rope_base = 256
+    use_xsa = True
     
     # ============================================================
     # REGION: EXTERNAL MODELS
@@ -106,12 +107,12 @@ class Config:
     # ============================================================
     # Base learning rate (AdamW / 8-bit Adam)
     # 1e-4 or 2e-4 for fresh/aggressive and 4e-5 or 5e-5 for fine-tuning
-    learning_rate = 1e-4
+    learning_rate = 2e-4
     # Total number of epochs (from scratch or resumed)
     epochs = 1400
     # Effective batch size per optimizer step
-    batch_size = 8
-    accum_steps = 4
+    batch_size = 16
+    accum_steps = 2
     dynamic_buckets = False
     # Loss for velocity prediction
     # Options: "mse", "l1", "huber". "edm"
@@ -123,7 +124,7 @@ class Config:
     optimizer_warmup = 0.05
     offset_noise = 0.05
     # Drop text conditioning during training (CFG support)    
-    text_dropout = 0.15
+    text_dropout = 0.10
     # Random horizontal flip in latent space
     flip_aug = False 
     
@@ -135,7 +136,7 @@ class Config:
     gradient_checkpointing = True
     # Exponential Moving Average for inference stability
     use_ema = True
-    ema_decay = 0.999
+    ema_decay = 0.99
     
     # ============================================================
     # REGION: FLOW MATCHING & SAMPLING

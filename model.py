@@ -85,22 +85,45 @@ class RMSNorm(nn.Module):
         var = torch.mean(x_float ** 2, dim=-1, keepdim=True)
         x_norm = x_float * torch.rsqrt(var + self.eps)
         return self.weight * x_norm.to(x.dtype)
-
+    
 class SwiGLU(nn.Module):
-    def __init__(self, dim, hidden_dim, multiple_of=256):
+    def __init__(self, dim, hidden_dim, multiple_of=256, use_conv=False):
         super().__init__()
+        self.use_conv = use_conv 
         hidden_dim = int(2 * hidden_dim / 3)
         hidden_dim = multiple_of * ((hidden_dim + multiple_of - 1) // multiple_of)
+        
         self.w1 = nn.Linear(dim, hidden_dim, bias=False)
         self.w2 = nn.Linear(dim, hidden_dim, bias=False)
         self.w3 = nn.Linear(hidden_dim, dim, bias=False)
 
-    def forward(self, x):
-        return self.w3(F.silu(self.w1(x)) * self.w2(x))
+        if self.use_conv:
+            self.dwconv = nn.Conv2d(hidden_dim, hidden_dim, kernel_size=3, stride=1, padding=1, 
+                                    groups=hidden_dim, bias=True)
+
+    def forward(self, x, seq_len_text=0, grid_h=0, grid_w=0):
+        x1 = self.w1(x)
+        x2 = self.w2(x)
+        
+        x_gated = F.silu(x1) * x2 
+
+        if self.use_conv and grid_h > 0:
+            text_part = x_gated[:, :seq_len_text, :]
+            img_part = x_gated[:, seq_len_text:, :]
+            
+            B, L, C = img_part.shape
+            img_spatial = img_part.transpose(1, 2).contiguous().view(B, C, grid_h, grid_w)
+            img_spatial = self.dwconv(img_spatial)
+            img_mixed = img_spatial.reshape(B, C, L).transpose(1, 2)
+            
+            x_gated = torch.cat([text_part, img_mixed], dim=1)
+        
+        return self.w3(x_gated)
 
 class VisualFusionBlock(nn.Module):
-    def __init__(self, hidden_size, num_heads, dropout=0.0):
+    def __init__(self, hidden_size, num_heads, dropout=0.0, use_conv=False, use_xsa=True):
         super().__init__()
+        self.use_xsa = use_xsa
         self.num_heads = num_heads
         self.head_dim = hidden_size // num_heads
         
@@ -114,25 +137,27 @@ class VisualFusionBlock(nn.Module):
         self.attention_v = nn.Linear(hidden_size, hidden_size, bias=False)
         self.attention_out = nn.Linear(hidden_size, hidden_size, bias=False)
         
-        self.feed_forward = SwiGLU(hidden_size, hidden_size * 4)
+        self.feed_forward = SwiGLU(hidden_size, hidden_size * 4.0, use_conv=use_conv)
             
-        self.adaLN_modulation = nn.Sequential(
-            nn.SiLU(),
-            nn.Linear(hidden_size, 6 * hidden_size, bias=True)
-        )
+        self.adaLN_msa = nn.Sequential(nn.SiLU(), nn.Linear(hidden_size, 3 * hidden_size, bias=True))
+        self.adaLN_mlp = nn.Sequential(nn.SiLU(), nn.Linear(hidden_size, 3 * hidden_size, bias=True))
         
-        nn.init.constant_(self.adaLN_modulation[-1].weight, 0)
-        nn.init.constant_(self.adaLN_modulation[-1].bias, 0)
+        nn.init.constant_(self.adaLN_msa[-1].weight, 0); 
+        nn.init.constant_(self.adaLN_msa[-1].bias, 0)
+        
+        nn.init.constant_(self.adaLN_mlp[-1].weight, 0); 
+        nn.init.constant_(self.adaLN_mlp[-1].bias, 0)
         
         self.dropout = nn.Dropout(dropout)
 
-    def forward(self, x, c, f0, f1, f2, attend_mask=None):
+    def forward(self, x, c, f0, f1, f2, seq_len_text, grid_h, grid_w, attend_mask=None):
         B, N, C = x.shape
         
         if attend_mask is None:
             attend_mask = torch.ones(B, N, dtype=torch.bool, device=x.device)
         
-        shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp = self.adaLN_modulation(c).chunk(6, dim=1)
+        shift_msa, scale_msa, gate_msa = self.adaLN_msa(c).chunk(3, dim=1)
+        shift_mlp, scale_mlp, gate_mlp = self.adaLN_mlp(c).chunk(3, dim=1)
         
         x_norm = self.attention_norm1(x)
         x_modulated = x_norm * (1 + scale_msa.unsqueeze(1)) + shift_msa.unsqueeze(1)
@@ -156,21 +181,28 @@ class VisualFusionBlock(nn.Module):
         
         attn_mask = attend_mask.unsqueeze(1).unsqueeze(2)
         attn = F.scaled_dot_product_attention(q, k, v, attn_mask=attn_mask)
+         
+        if self.use_xsa:
+            dot_prod = torch.sum(attn * v, dim=-1, keepdim=True) 
+            v_norm_sq = torch.sum(v * v, dim=-1, keepdim=True) + 1e-6 
+            attn = attn - (dot_prod / v_norm_sq) * v
+        
         attn = attn.transpose(1, 2).reshape(B, N, C)
         
         x = x + gate_msa.unsqueeze(1) * self.dropout(self.attention_out(attn))
         
         x_norm_ffn = self.ffn_norm1(x)
         x_modulated_ffn = x_norm_ffn * (1 + scale_mlp.unsqueeze(1)) + shift_mlp.unsqueeze(1)
-        ffn_out = self.feed_forward(x_modulated_ffn)
+        ffn_out = self.feed_forward(x_modulated_ffn, seq_len_text, grid_h, grid_w)
         
         x = x + gate_mlp.unsqueeze(1) * self.dropout(ffn_out)
             
         return x
 
 class ContextRefinerBlock(nn.Module):
-    def __init__(self, hidden_size, num_heads):
+    def __init__(self, hidden_size, num_heads, use_xsa=True):
         super().__init__()
+        self.use_xsa = use_xsa
         self.num_heads = num_heads
         self.head_dim = hidden_size // num_heads
         
@@ -183,7 +215,7 @@ class ContextRefinerBlock(nn.Module):
         self.attention_k = nn.Linear(hidden_size, hidden_size, bias=False)
         self.attention_v = nn.Linear(hidden_size, hidden_size, bias=False)
         self.attention_out = nn.Linear(hidden_size, hidden_size, bias=False)
-        self.feed_forward = SwiGLU(hidden_size, hidden_size * 4)
+        self.feed_forward = SwiGLU(hidden_size, hidden_size * 4.0)
 
     def forward(self, x, f0, f1, f2, attend_mask=None):
         B, N, C = x.shape
@@ -212,6 +244,12 @@ class ContextRefinerBlock(nn.Module):
         
         attn_mask = attend_mask.unsqueeze(1).unsqueeze(2)
         attn = F.scaled_dot_product_attention(q, k, v, attn_mask=attn_mask)
+        
+        if self.use_xsa:
+            dot_prod = torch.sum(attn * v, dim=-1, keepdim=True) 
+            v_norm_sq = torch.sum(v * v, dim=-1, keepdim=True) + 1e-6 
+            attn = attn - (dot_prod / v_norm_sq) * v
+        
         attn = attn.transpose(1, 2).reshape(B, N, C)
         
         x = x + self.attention_out(attn)
@@ -232,13 +270,15 @@ class SingleStreamDiT(nn.Module):
                  refiner_depth=Config.refiner_depth,
                  max_token_length=Config.max_token_length,
                  dropout=Config.model_dropout,
-                 rope_base=Config.rope_base):
+                 rope_base=Config.rope_base,
+                 use_xsa=Config.use_xsa):
         super().__init__()
         self.gradient_checkpointing = gradient_checkpointing
         self.patch_size = patch_size
         self.in_channels = in_channels
         self.hidden_size = hidden_size
         self.head_dim = hidden_size // num_heads
+        self.use_xsa = use_xsa
         
         patch_dim = in_channels * (patch_size ** 2)
         self.x_embedder = nn.Linear(patch_dim, hidden_size)
@@ -259,17 +299,17 @@ class SingleStreamDiT(nn.Module):
         self.rope = Rope3D(self.head_dim, rope_base)
         
         self.noise_refiner = nn.ModuleList([
-            VisualFusionBlock(hidden_size, num_heads, dropout=dropout) 
+            VisualFusionBlock(hidden_size, num_heads, dropout=dropout, use_conv=True, use_xsa=self.use_xsa) 
             for _ in range(refiner_depth)
         ])
         
         self.context_refiner = nn.ModuleList([
-            ContextRefinerBlock(hidden_size, num_heads) 
+            ContextRefinerBlock(hidden_size, num_heads, use_xsa=self.use_xsa) 
             for _ in range(refiner_depth)
         ])
         
         self.blocks = nn.ModuleList([
-            VisualFusionBlock(hidden_size, num_heads, dropout=dropout) 
+            VisualFusionBlock(hidden_size, num_heads, dropout=dropout, use_conv=True, use_xsa=self.use_xsa) 
             for _ in range(depth)
         ])            
                 
@@ -315,9 +355,9 @@ class SingleStreamDiT(nn.Module):
         
         for block in self.noise_refiner:
             if self.gradient_checkpointing:
-                x = checkpoint(block, x, t_emb, f0_img, f1_img, f2_img, use_reentrant=False)
+                x = checkpoint(block, x, t_emb, f0_img, f1_img, f2_img, 0, grid_h, grid_w, use_reentrant=False)
             else:
-                x = block(x, t_emb, f0_img, f1_img, f2_img)
+                x = block(x, t_emb, f0_img, f1_img, f2_img, 0, grid_h, grid_w)
                 
         for block in self.context_refiner:
              if self.gradient_checkpointing:
@@ -330,9 +370,11 @@ class SingleStreamDiT(nn.Module):
         
         for i, block in enumerate(self.blocks):
             if self.gradient_checkpointing:
-                x_concat = checkpoint(block, x_concat, t_emb, f0, f1, f2, full_mask, use_reentrant=False)
+                x_concat = checkpoint(block, x_concat, t_emb, f0, f1, f2, seq_len_text, grid_h, 
+                                      grid_w, full_mask, use_reentrant=False)
             else:
-                x_concat = block(x_concat, t_emb, f0, f1, f2, attend_mask=full_mask)
+                x_concat = block(x_concat, t_emb, f0, f1, f2, seq_len_text, grid_h, grid_w, 
+                                 attend_mask=full_mask)
             
         # 5. Output
         img_token_len = grid_h * grid_w
@@ -363,7 +405,7 @@ class SingleStreamDiT(nn.Module):
         x = x.reshape(x.shape[0], h, w, c, p, p)
         x = x.permute(0, 3, 1, 4, 2, 5).reshape(x.shape[0], c, h * p, w * p)
         return x
-
+                
     def initialize_weights(self):
         nn.init.normal_(self.x_embedder.weight, std=0.02)
         nn.init.normal_(self.cap_embedder[1].weight, std=0.02)
@@ -372,24 +414,29 @@ class SingleStreamDiT(nn.Module):
         nn.init.normal_(self.t_embedder[0].weight, std=0.02)
         nn.init.normal_(self.t_embedder[2].weight, std=0.02)
         
-        nn.init.constant_(self.final_layer.weight, 0)
-        nn.init.constant_(self.final_layer.bias, 0)
-        
         nn.init.normal_(self.cap_pad_token, std=0.02)
         nn.init.normal_(self.text_pos_embed, std=0.02)
         
+        nn.init.constant_(self.final_layer.weight, 0)
+        nn.init.constant_(self.final_layer.bias, 0)
+
         for m in self.modules():
-            if isinstance(m, RMSNorm):
+            if isinstance(m, nn.Linear):
+                if m not in [self.x_embedder, self.final_layer]:
+                    nn.init.normal_(m.weight, std=0.02)
+                    if m.bias is not None:
+                        nn.init.constant_(m.bias, 0)
+
+            elif isinstance(m, RMSNorm):
                 nn.init.ones_(m.weight)
-                
-        for module in self.modules():
-            if isinstance(module, SwiGLU):
-                nn.init.xavier_uniform_(module.w1.weight)
-                nn.init.xavier_uniform_(module.w2.weight)
-                nn.init.xavier_uniform_(module.w3.weight)
-                
-        for module in [self.noise_refiner, self.context_refiner, self.blocks]:
-            for name, p in module.named_parameters():
-                if p.dim() > 1 and "SwiGLU" not in name:
-                    if "q" in name or "k" in name or "v" in name or "out" in name:
-                        nn.init.normal_(p, std=0.02)
+            
+            elif isinstance(m, SwiGLU):
+                nn.init.xavier_uniform_(m.w1.weight)
+                nn.init.xavier_uniform_(m.w2.weight)
+                nn.init.xavier_uniform_(m.w3.weight)
+                if m.use_conv:
+                    with torch.no_grad():
+                        m.dwconv.weight.fill_(0.0)
+                        m.dwconv.weight[:, 0, 1, 1] = 1.0 
+                        if m.dwconv.bias is not None:
+                            nn.init.constant_(m.dwconv.bias, 0)

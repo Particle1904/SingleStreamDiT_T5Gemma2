@@ -29,16 +29,15 @@ def prepare_latents_for_decode(latents: torch.Tensor, clamp=False, print_debug=F
 
 def decode_latents_to_image(vae_model, latents: torch.Tensor, device) -> Image.Image:
     latents = prepare_latents_for_decode(latents)
-
     with torch.no_grad():
         device_type = device.type if isinstance(device, torch.device) else device
-        with torch.autocast(device_type, enabled=False): 
-            image_tensor = vae_model.decode(latents.float()).sample
-
+        with torch.autocast(device_type, enabled=False):
+            decoded = vae_model.decode(latents.float())
+            image_tensor = decoded.sample if hasattr(decoded, "sample") else decoded[0]
+            
     image_tensor = (image_tensor / 2 + 0.5).clamp(0, 1)
     image_tensor = image_tensor.cpu().permute(0, 2, 3, 1).float().numpy()
     image_tensor = (image_tensor * 255).round().astype("uint8")
-    
     return Image.fromarray(image_tensor[0])
 
 def get_combined_text_embeds(prompt: str, neg_prompt: str, cfg: float, tokenizer, text_encoder, 
