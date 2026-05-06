@@ -183,9 +183,11 @@ class VisualFusionBlock(nn.Module):
         attn = F.scaled_dot_product_attention(q, k, v, attn_mask=attn_mask)
          
         if self.use_xsa:
-            dot_prod = torch.sum(attn * v, dim=-1, keepdim=True) 
-            v_norm_sq = torch.sum(v * v, dim=-1, keepdim=True) + 1e-6 
-            attn = attn - (dot_prod / v_norm_sq) * v
+            attn_f32 = attn.float()
+            v_f32 = v.float()
+            dot_prod = torch.sum(attn_f32 * v_f32, dim=-1, keepdim=True) 
+            v_norm_sq = torch.sum(v_f32 * v_f32, dim=-1, keepdim=True) + 1e-6 
+            attn = (attn_f32 - (dot_prod / v_norm_sq) * v_f32).to(attn.dtype)
         
         attn = attn.transpose(1, 2).reshape(B, N, C)
         
@@ -246,9 +248,11 @@ class ContextRefinerBlock(nn.Module):
         attn = F.scaled_dot_product_attention(q, k, v, attn_mask=attn_mask)
         
         if self.use_xsa:
-            dot_prod = torch.sum(attn * v, dim=-1, keepdim=True) 
-            v_norm_sq = torch.sum(v * v, dim=-1, keepdim=True) + 1e-6 
-            attn = attn - (dot_prod / v_norm_sq) * v
+            attn_f32 = attn.float()
+            v_f32 = v.float()
+            dot_prod = torch.sum(attn_f32 * v_f32, dim=-1, keepdim=True) 
+            v_norm_sq = torch.sum(v_f32 * v_f32, dim=-1, keepdim=True) + 1e-6 
+            attn = (attn_f32 - (dot_prod / v_norm_sq) * v_f32).to(attn.dtype)
         
         attn = attn.transpose(1, 2).reshape(B, N, C)
         
