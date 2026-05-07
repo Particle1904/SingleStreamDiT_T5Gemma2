@@ -355,16 +355,16 @@ class SingleStreamDiT(nn.Module):
         
         for block in self.noise_refiner:
             if self.gradient_checkpointing:
-                x = checkpoint(block, x, t_emb, f0_img, f1_img, f2_img, 0, grid_h, grid_w, 
+                x = checkpoint(block, x, t_emb, f0_img, f1_img, f2_img, 0, grid_h, grid_w,
                                attend_mask=None, use_reentrant=False)
             else:
                 x = block(x, t_emb, f0_img, f1_img, f2_img, 0, grid_h, grid_w)
                 
         for block in self.context_refiner:
-             if self.gradient_checkpointing:
-                context = checkpoint(block, context, None, f0_txt, f1_txt, f2_txt, 
-                                     seq_len_text, 0, 0, attend_mask=text_mask, use_reentrant=False)
-             else:
+            if self.gradient_checkpointing:
+                context = checkpoint(block, context, f0_txt, f1_txt, f2_txt, 
+                                     attend_mask=text_mask, use_reentrant=False)
+            else:
                 context = block(context, f0_txt, f1_txt, f2_txt, attend_mask=text_mask)
                 
         # 4. Fusion
