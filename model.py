@@ -180,15 +180,13 @@ class VisualFusionBlock(nn.Module):
         k = k.transpose(1, 2)
         
         attn_mask = attend_mask.unsqueeze(1).unsqueeze(2)
-        attn = F.scaled_dot_product_attention(q, k, v, attn_mask=attn_mask)
-         
-        if self.use_xsa:
-            attn_f32 = attn.float()
-            v_f32 = v.float()
-            dot_prod = torch.sum(attn_f32 * v_f32, dim=-1, keepdim=True) 
-            v_norm_sq = torch.sum(v_f32 * v_f32, dim=-1, keepdim=True) + 1e-6 
-            attn = (attn_f32 - (dot_prod / v_norm_sq) * v_f32).to(attn.dtype)
         
+        if self.use_xsa:
+            if not hasattr(self, '_diag_mask') or self._diag_mask.shape[-1] != N:
+                self._diag_mask = ~torch.eye(N, dtype=torch.bool, device=q.device).unsqueeze(0).unsqueeze(0)
+            attn_mask = attn_mask & self._diag_mask
+        
+        attn = F.scaled_dot_product_attention(q, k, v, attn_mask=attn_mask)
         attn = attn.transpose(1, 2).reshape(B, N, C)
         
         x = x + gate_msa.unsqueeze(1) * self.dropout(self.attention_out(attn))
@@ -245,15 +243,13 @@ class ContextRefinerBlock(nn.Module):
         k = k.transpose(1, 2)
         
         attn_mask = attend_mask.unsqueeze(1).unsqueeze(2)
-        attn = F.scaled_dot_product_attention(q, k, v, attn_mask=attn_mask)
         
         if self.use_xsa:
-            attn_f32 = attn.float()
-            v_f32 = v.float()
-            dot_prod = torch.sum(attn_f32 * v_f32, dim=-1, keepdim=True) 
-            v_norm_sq = torch.sum(v_f32 * v_f32, dim=-1, keepdim=True) + 1e-6 
-            attn = (attn_f32 - (dot_prod / v_norm_sq) * v_f32).to(attn.dtype)
+            if not hasattr(self, '_diag_mask') or self._diag_mask.shape[-1] != N:
+                self._diag_mask = ~torch.eye(N, dtype=torch.bool, device=q.device).unsqueeze(0).unsqueeze(0)
+            attn_mask = attn_mask & self._diag_mask
         
+        attn = F.scaled_dot_product_attention(q, k, v, attn_mask=attn_mask)
         attn = attn.transpose(1, 2).reshape(B, N, C)
         
         x = x + self.attention_out(attn)
@@ -359,13 +355,15 @@ class SingleStreamDiT(nn.Module):
         
         for block in self.noise_refiner:
             if self.gradient_checkpointing:
-                x = checkpoint(block, x, t_emb, f0_img, f1_img, f2_img, 0, grid_h, grid_w, use_reentrant=False)
+                x = checkpoint(block, x, t_emb, f0_img, f1_img, f2_img, 0, grid_h, grid_w, 
+                               attend_mask=None, use_reentrant=False)
             else:
                 x = block(x, t_emb, f0_img, f1_img, f2_img, 0, grid_h, grid_w)
                 
         for block in self.context_refiner:
              if self.gradient_checkpointing:
-                context = checkpoint(block, context, f0_txt, f1_txt, f2_txt, text_mask, use_reentrant=False)
+                context = checkpoint(block, context, None, f0_txt, f1_txt, f2_txt, 
+                                     seq_len_text, 0, 0, attend_mask=text_mask, use_reentrant=False)
              else:
                 context = block(context, f0_txt, f1_txt, f2_txt, attend_mask=text_mask)
                 
@@ -375,7 +373,7 @@ class SingleStreamDiT(nn.Module):
         for i, block in enumerate(self.blocks):
             if self.gradient_checkpointing:
                 x_concat = checkpoint(block, x_concat, t_emb, f0, f1, f2, seq_len_text, grid_h, 
-                                      grid_w, full_mask, use_reentrant=False)
+                                      grid_w, attend_mask=full_mask, use_reentrant=False)
             else:
                 x_concat = block(x_concat, t_emb, f0, f1, f2, seq_len_text, grid_h, grid_w, 
                                  attend_mask=full_mask)

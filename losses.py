@@ -37,46 +37,32 @@ def get_base_loss(v_pred, target, loss_type):
 
 def get_fourier_amplitude_loss(x_hat_1, x_1, t, fal_lambda=0.05):
     fal_curriculum_mask = (t > 0.5).view(-1, 1, 1, 1)
-
-    time_weight = t.view(-1, 1, 1, 1) ** 2 
-
-    x_hat_fft = torch.fft.rfft2(x_hat_1.float(), dim=(-2, -1), norm='ortho')
-    x_true_fft = torch.fft.rfft2(x_1.float(), dim=(-2, -1), norm='ortho')
+    time_weight = t.view(-1, 1, 1, 1) ** 2
     
-    loss_fal_raw = F.mse_loss(torch.abs(x_hat_fft), torch.abs(x_true_fft), reduction='none')    
+    x_hat_fft = torch.fft.fft2(x_hat_1.float(), dim=(-2, -1), norm='ortho')
+    x_true_fft = torch.fft.fft2(x_1.float(), dim=(-2, -1), norm='ortho')
+    
+    loss_fal_raw = F.mse_loss(torch.abs(x_hat_fft), torch.abs(x_true_fft), reduction='none')
     loss_fal = (loss_fal_raw * fal_curriculum_mask * time_weight).mean()
     
     return fal_lambda * loss_fal
 
+
 def get_fourier_correlation_loss(x_hat_1, x_1, t, fcl_lambda=0.05):
     fcl_curriculum_mask = (t > 0.3).view(-1, 1, 1, 1)
     
-    x_hat_1_float = x_hat_1.float()
-    x_1_float = x_1.float()
-
-    F = torch.fft.rfft2(x_1_float, dim=(-2, -1), norm='ortho')
-    F_hat = torch.fft.rfft2(x_hat_1_float, dim=(-2, -1), norm='ortho')
-
-    numerator_complex = F * torch.conj(F_hat) 
-    numerator_real_sum = torch.sum(numerator_complex.real, dim=(-3, -2, -1))
-
-    F_abs_sq_sum = torch.sum(torch.abs(F)**2, dim=(-3, -2, -1))
-    F_hat_abs_sq_sum = torch.sum(torch.abs(F_hat)**2, dim=(-3, -2, -1))
+    x_hat_flat = x_hat_1.view(x_hat_1.size(0), -1).float()
+    x_1_flat = x_1.view(x_1.size(0), -1).float()
     
-    denominator = torch.sqrt(F_abs_sq_sum + 1e-8) * torch.sqrt(F_hat_abs_sq_sum + 1e-8)
-
-    correlation = numerator_real_sum / denominator
-    correlation = torch.clamp(correlation, -1.0, 1.0) 
+    correlation = F.cosine_similarity(x_hat_flat, x_1_flat, dim=1)
+    loss_fcl_raw = 1.0 - correlation.clamp(-1.0, 1.0)
     
-    loss_fcl_raw = 1.0 - correlation
     loss_fcl = (loss_fcl_raw.view(-1, 1, 1, 1) * fcl_curriculum_mask).mean()
-
+    
     return fcl_lambda * loss_fcl
 
 def get_edm_loss(v_pred, target, t):
-    t_sq = t.pow(2)
-    weight = (t_sq + 1.0) / (t_sq * 1.0) 
-    weight = weight.clamp(max=100.0) 
+    weight = (1.0 - t).pow(2) + t.pow(2)
     loss = F.mse_loss(v_pred, target, reduction='none')
     return (loss * weight.view(-1, 1, 1, 1)).mean()
 
