@@ -111,7 +111,7 @@ class Config:
     # Total number of epochs (from scratch or resumed)
     epochs = 1400
     # Effective batch size per optimizer step
-    batch_size = 16
+    batch_size = 32
     accum_steps = 2
     dynamic_buckets = False
     # Loss for velocity prediction
