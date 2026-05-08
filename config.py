@@ -119,12 +119,12 @@ class Config:
     loss_type = "edm"
     
     # Transformer regularization
-    model_dropout = 0.05
-    weight_decay = 0.0
+    model_dropout = 0.1
+    weight_decay = 0.05
     optimizer_warmup = 0.05
     offset_noise = 0.05
     # Drop text conditioning during training (CFG support)    
-    text_dropout = 0.0
+    text_dropout = 0.1
     # Random horizontal flip in latent space
     flip_aug = False 
     
@@ -136,7 +136,7 @@ class Config:
     gradient_checkpointing = True
     # Exponential Moving Average for inference stability
     use_ema = True
-    ema_decay = 0.99
+    ema_decay = 0.999
     
     # ============================================================
     # REGION: FLOW MATCHING & SAMPLING
@@ -178,7 +178,7 @@ class Config:
     save_every = 100
     validate_every = 25
     # Validation sampling parameters
-    validate_cfg = 3.00
+    validate_cfg = 5.0
     validate_steps = 30 
     validate_sampler = "euler"
     

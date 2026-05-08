@@ -147,7 +147,7 @@ def train():
     vae = load_vae()
     
     model.initialize_weights()
-    ema_model = AveragedModel(model, multi_avg_fn=get_ema_multi_avg_fn(Config.ema_decay))
+    ema_model = AveragedModel(model.float(), multi_avg_fn=get_ema_multi_avg_fn(Config.ema_decay))
     ema_model.requires_grad_(False)
     
     full_dataset = TextImageDataset()

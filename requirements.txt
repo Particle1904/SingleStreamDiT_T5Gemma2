@@ -10,4 +10,3 @@ tqdm
 sentencepiece
 tiktoken
 protobuf
-wandb
