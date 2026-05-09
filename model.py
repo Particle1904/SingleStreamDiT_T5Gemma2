@@ -288,7 +288,6 @@ class SingleStreamDiT(nn.Module):
         )
         
         self.cap_pad_token = nn.Parameter(torch.zeros(1, 1, hidden_size))
-        self.text_pos_embed = nn.Parameter(torch.zeros(1, max_token_length, hidden_size))
         
         self.t_embedder = nn.Sequential(
             nn.Linear(256, hidden_size), 
@@ -337,7 +336,6 @@ class SingleStreamDiT(nn.Module):
         if is_null.any():
             null_mask = is_null.view(-1, 1, 1)
             context = torch.where(null_mask, self.cap_pad_token.expand_as(context), context)
-        context = context + self.text_pos_embed[:, :seq_len_text, :]
         
         img_len = grid_h * grid_w
         full_mask = torch.cat([text_mask, torch.ones(B, img_len, dtype=torch.bool, device=x.device)], dim=1)
@@ -391,7 +389,7 @@ class SingleStreamDiT(nn.Module):
     def timestep_embedding(self, t, dim):
         half = dim // 2
         freqs = torch.exp(-math.log(10000) * torch.arange(0, half, device=t.device).float() / half)
-        args = t[:, None].float() * freqs[None]
+        args = (t[:, None].float() * 1000.0) * freqs[None]
         return torch.cat([torch.cos(args), torch.sin(args)], dim=-1)
 
     def patchify(self, x):
@@ -417,7 +415,6 @@ class SingleStreamDiT(nn.Module):
         nn.init.normal_(self.t_embedder[2].weight, std=0.02)
         
         nn.init.normal_(self.cap_pad_token, std=0.02)
-        nn.init.normal_(self.text_pos_embed, std=0.02)
         
         nn.init.constant_(self.final_layer.weight, 0)
         nn.init.constant_(self.final_layer.bias, 0)

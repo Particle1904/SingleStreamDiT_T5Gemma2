@@ -91,11 +91,13 @@ def sanity():
             with torch.autocast(device_type=DEVICE, dtype=Config.dtype):
                 x_euler = run_sampling_pipeline(model=model, initial_noise=x_euler, steps=SAMPLE_STEPS, 
                                                 combined_text_embeds=combined_text_embeds, cfg=1.0, 
-                                                sampler_type="euler", shift_val=Config.shift_val, text_mask=combined_mask)
+                                                sampler_type="euler", schedule_type="uniform", 
+                                                shift_val=Config.shift_val, text_mask=combined_mask)
                 if ENABLE_RK4:
                     x_rk4 = run_sampling_pipeline(model=model, initial_noise=initial_noise.clone(), steps=SAMPLE_STEPS,
                                                   combined_text_embeds=combined_text_embeds, cfg=1.0, 
-                                                  sampler_type="rk4", shift_val=Config.shift_val, text_mask=combined_mask)
+                                                  sampler_type="rk4", scheduler_type="karras",
+                                                  shift_val=Config.shift_val, text_mask=combined_mask)
 
             img_pil_euler = decode_latents_to_image(vae_model=vae, latents=x_euler, device=DEVICE)
             img_list = [img_pil_euler]

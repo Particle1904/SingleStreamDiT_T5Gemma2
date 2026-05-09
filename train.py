@@ -90,7 +90,7 @@ def validate(accelerator, model, vae, epoch, global_step, is_ema=False):
                                               steps=Config.validate_steps, 
                                               combined_text_embeds=combined_text_embeds, cfg=Config.validate_cfg, 
                                               text_mask=combined_mask, sampler_type=Config.validate_sampler, 
-                                              shift_val=Config.shift_val)
+                                              schedule_type=Config.validate_scheduler, shift_val=Config.shift_val)
        
     image = decode_latents_to_image(vae_model=vae, latents=final_latents, device=Config.device)
     

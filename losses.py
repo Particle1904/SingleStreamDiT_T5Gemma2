@@ -16,13 +16,17 @@ def prepare_batch_and_targets(batch, device, dtype, shift_val, offset_noise, los
     else:
         u = torch.rand(x_1.shape[0], device=device, dtype=dtype)
     
-    t = get_1d_shifted_time(u, shift_val)            
-    x_0 = torch.randn_like(x_1)
-    x_0 = x_0 + offset_noise * torch.randn(x_1.shape[0], x_1.shape[1], 1, 1, device=device, dtype=dtype)            
+    t = get_1d_shifted_time(u, shift_val)
     
+    x_0 = torch.randn_like(x_1)
+    
+    if offset_noise > 0:
+        offset = torch.randn(x_1.shape[0], x_1.shape[1], 1, 1, device=device, dtype=dtype)
+        x_1 = x_1 + offset_noise * offset
+        
     x_t = (1.0 - t.view(-1,1,1,1)) * x_0 + t.view(-1,1,1,1) * x_1
     target = x_1 - x_0
-
+    
     return x_t, t, x_1, target, text, text_mask
 
 def get_base_loss(v_pred, target, loss_type):
@@ -36,20 +40,18 @@ def get_base_loss(v_pred, target, loss_type):
         return F.mse_loss(v_pred, target)
 
 def get_fourier_amplitude_loss(x_hat_1, x_1, t, fal_lambda=0.05):
-    fal_curriculum_mask = (t > 0.5).view(-1, 1, 1, 1)
     time_weight = t.view(-1, 1, 1, 1) ** 2
     
     x_hat_fft = torch.fft.fft2(x_hat_1.float(), dim=(-2, -1), norm='ortho')
     x_true_fft = torch.fft.fft2(x_1.float(), dim=(-2, -1), norm='ortho')
     
     loss_fal_raw = F.mse_loss(torch.abs(x_hat_fft), torch.abs(x_true_fft), reduction='none')
-    loss_fal = (loss_fal_raw * fal_curriculum_mask * time_weight).mean()
+    loss_fal = (loss_fal_raw * time_weight).mean()
     
     return fal_lambda * loss_fal
 
-
 def get_fourier_correlation_loss(x_hat_1, x_1, t, fcl_lambda=0.05):
-    fcl_curriculum_mask = (t > 0.3).view(-1, 1, 1, 1)
+    time_weight = t.view(-1, 1, 1, 1) ** 2
     
     x_hat_flat = x_hat_1.view(x_hat_1.size(0), -1).float()
     x_1_flat = x_1.view(x_1.size(0), -1).float()
@@ -57,7 +59,7 @@ def get_fourier_correlation_loss(x_hat_1, x_1, t, fcl_lambda=0.05):
     correlation = F.cosine_similarity(x_hat_flat, x_1_flat, dim=1)
     loss_fcl_raw = 1.0 - correlation.clamp(-1.0, 1.0)
     
-    loss_fcl = (loss_fcl_raw.view(-1, 1, 1, 1) * fcl_curriculum_mask).mean()
+    loss_fcl = (loss_fcl_raw.view(-1, 1, 1, 1) * time_weight).mean()
     
     return fcl_lambda * loss_fcl
 

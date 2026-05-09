@@ -43,22 +43,29 @@ def decode_latents_to_image(vae_model, latents: torch.Tensor, device) -> Image.I
 def get_combined_text_embeds(prompt: str, neg_prompt: str, cfg: float, tokenizer, text_encoder, 
                              max_token_length: int, device: str, dtype: torch.dtype) -> torch.Tensor:
     
-    # Positive Embedding
-    inputs_cond = tokenizer(prompt, max_length=max_token_length, padding="max_length", truncation=True, 
-                            return_tensors="pt").to(device)
+    tokenize_fn = lambda p: tokenizer(p, max_length=max_token_length, padding="max_length", 
+                                      truncation=True, return_tensors="pt").to(device)
+
+    # Positive Embeddings
+    inputs_cond = tokenize_fn(prompt)
     out_cond = text_encoder(input_ids=inputs_cond.input_ids, attention_mask=inputs_cond.attention_mask)
     cond_embeds = out_cond.last_hidden_state if hasattr(out_cond, "last_hidden_state") else out_cond[0]
     
-    # Negative Embedding, fall back to empty if no prompt
+    # Negative Embeddings
     if neg_prompt and cfg > 1.0:
-        inputs_uncond = tokenizer(neg_prompt, max_length=max_token_length, padding="max_length", truncation=True, 
-                                  return_tensors="pt").to(device)
+        inputs_uncond = tokenize_fn(neg_prompt)
         out_uncond = text_encoder(input_ids=inputs_uncond.input_ids, attention_mask=inputs_uncond.attention_mask)
         uncond_embeds = out_uncond.last_hidden_state if hasattr(out_uncond, "last_hidden_state") else out_uncond[0]
+        uncond_mask = inputs_uncond.attention_mask.bool()
     else:
         uncond_embeds = torch.zeros_like(cond_embeds)
-        uncond_mask = torch.ones(cond_embeds.shape[0], cond_embeds.shape[1], dtype=torch.bool, device=device)
+        uncond_mask = torch.zeros_like(inputs_cond.attention_mask.bool())
     
+    if cond_embeds.shape != uncond_embeds.shape:
+        uncond_embeds = torch.zeros_like(cond_embeds)
+        uncond_mask = torch.zeros_like(inputs_cond.attention_mask.bool())
+
     combined_text = torch.cat([uncond_embeds, cond_embeds], dim=0).to(dtype=dtype)
     combined_mask = torch.cat([uncond_mask, inputs_cond.attention_mask.bool()], dim=0)
+    
     return combined_text, combined_mask
