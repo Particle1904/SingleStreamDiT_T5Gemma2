@@ -85,7 +85,7 @@ class TextImageDataset(Dataset):
         }
 
 class BucketBatchSampler(Sampler):
-    def __init__(self, buckets, batch_size, drop_last=True):
+    def __init__(self, buckets, batch_size, drop_last=False):
         self.buckets = buckets
         self.batch_size = batch_size
         self.drop_last = drop_last

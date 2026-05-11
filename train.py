@@ -23,7 +23,7 @@ from model_loader import load_vae
 from samplers import run_sampling_pipeline
 from losses import calculate_total_loss, prepare_batch_and_targets
 from checkpoint_manager import CheckpointManager
-from utilities import parse_run_name
+from utilities import parse_run_name, print_model_parameters
 
 warnings.filterwarnings("ignore", message="The `local_dir_use_symlinks` argument is deprecated")
 
@@ -147,6 +147,7 @@ def train():
     vae = load_vae()
     
     model.initialize_weights()
+    print_model_parameters(model)
     ema_model = AveragedModel(model.float(), multi_avg_fn=get_ema_multi_avg_fn(Config.ema_decay))
     ema_model.requires_grad_(False)
     

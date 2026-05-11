@@ -25,3 +25,15 @@ def get_text_encoder_name():
         text_encoder_name = Config.text_model_id.split("/")[-1]
         
     return text_encoder_name
+
+def print_model_parameters(model, name="Model"):
+    total_params = sum(p.numel() for p in model.parameters())
+    trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    
+    print(f"\n{'='*30}")
+    print(f"Structure: {name}")
+    print(f"{'='*30}")
+    print(f"Total Parameters:     {total_params:,}")
+    print(f"Trainable Parameters: {trainable_params:,}")
+    print(f"Non-trainable:        {total_params - trainable_params:,}")
+    print(f"{'='*30}\n")

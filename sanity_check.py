@@ -15,7 +15,7 @@ from latents import decode_latents_to_image
 from samplers import run_sampling_pipeline
 from losses import calculate_total_loss, prepare_batch_and_targets
 import wandb
-from utilities import parse_run_name
+from utilities import parse_run_name, print_model_parameters
 
 DEVICE = "cuda"
 
@@ -64,7 +64,7 @@ def sanity():
     model = SingleStreamDiT(in_channels=Config.in_channels, gradient_checkpointing=False).to(DEVICE, Config.dtype)
     
     model.initialize_weights() 
-    
+    print_model_parameters(model)
     ema_model = AveragedModel(model, multi_avg_fn=get_ema_multi_avg_fn(Config.ema_decay))
     optimizer = bnb.optim.AdamW8bit(model.parameters(), lr=LEARNING_RATE, weight_decay=Config.weight_decay)
     

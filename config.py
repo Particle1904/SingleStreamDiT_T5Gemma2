@@ -51,8 +51,6 @@ class Config:
     # 1152 -> T5Gemma2-1B-1B
     # 2560 -> T5Gemma2-4B-4B
     text_embed_dim = 1152
-    # FLUX VAE latent channels (FLUX.1 uses 16, FLUX.2 uses 32, SD VAE uses 4)
-    in_channels = 32    
 
     # DiT backbone
     hidden_size = 768
@@ -74,6 +72,9 @@ class Config:
     # ============================================================
     # "diffusers/FLUX.1-vae"
     vae_id = "kaiyuyue/FLUX.2-dev-vae"
+    # FLUX VAE latent channels (FLUX.1 uses 16, FLUX.2 uses 32, SD VAE uses 4)
+    in_channels = 32
+    preprocess_batch_size = 4
     text_model_id = "google/t5gemma-2-1b-1b"
     
     # ============================================================
@@ -113,7 +114,6 @@ class Config:
     # Effective batch size per optimizer step
     batch_size = 32
     accum_steps = 2
-    dynamic_buckets = False
     # Loss for velocity prediction
     # Options: "mse", "l1", "huber". "edm"
     loss_type = "edm"
@@ -142,7 +142,8 @@ class Config:
     # REGION: FLOW MATCHING & SAMPLING
     # Time parameterization and numerical integration
     # ============================================================
-    shift_val = 3.0        
+    # 3.0 for FLUX1 VAE, 4.63-6.93 for FLUX2 VAE
+    shift_val = 5.78        
     
     # ============================================================
     # REGION: SELF-Evaluation (EXPERIMENTAL)
