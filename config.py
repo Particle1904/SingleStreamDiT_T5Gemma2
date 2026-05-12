@@ -143,7 +143,7 @@ class Config:
     # Time parameterization and numerical integration
     # ============================================================
     # 3.0 for FLUX1 VAE, 4.63-6.93 for FLUX2 VAE
-    shift_val = 4.69 
+    shift_val = 4.69    
     
     # ============================================================
     # REGION: SELF-Evaluation (EXPERIMENTAL)
@@ -198,8 +198,10 @@ class Config:
     # ============================================================
     # REGION: HUGGINGFACE INTEGRATION
     # ============================================================
-    push_to_hub = True  # Set to True to enable HF uploads
-    hf_repo_id = "Crowlley/SingleStreamDiT-T5Gemma2" 
+    # How many checkpoints to keep in HF
+    keep_last = 4
+    push_to_hub = False
+    hf_repo_id = "Crowlley/SingleStreamDiT" 
     hf_token = os.environ.get("HF_TOKEN")
     
     compile_model = False

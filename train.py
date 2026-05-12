@@ -43,11 +43,7 @@ Config.samples_dir = os.path.join(Config.output_dir, "samples")
 Config.log_file = os.path.join(Config.output_dir, "logs", f"{Config.project_name}_log.csv")
 
 def can_attempt_resume(resume_value):
-    if resume_value is None:
-        return False
-    if resume_value == "latest":
-        return True
-    return os.path.exists(resume_value)
+    return resume_value is not None
 
 class CSVLogger:
     def __init__(self, filepath, resume=False):
