@@ -143,7 +143,7 @@ class Config:
     # Time parameterization and numerical integration
     # ============================================================
     # 3.0 for FLUX1 VAE, 4.63-6.93 for FLUX2 VAE
-    shift_val = 5.78        
+    shift_val = 4.69 
     
     # ============================================================
     # REGION: SELF-Evaluation (EXPERIMENTAL)

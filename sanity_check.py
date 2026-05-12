@@ -19,7 +19,7 @@ from utilities import parse_run_name, print_model_parameters
 
 DEVICE = "cuda"
 
-STEPS = 2000
+STEPS = 1000
 LEARNING_RATE = 4e-4
 SAMPLE_EVERY = 200
 SAMPLE_STEPS = 50

@@ -141,8 +141,20 @@ def train():
         wandb_run_id = accelerator.get_tracker("wandb").run.id
 
     print(f"Loading DiT & VAE...")
-    model = SingleStreamDiT(in_channels=Config.in_channels, 
-                            gradient_checkpointing=Config.gradient_checkpointing).to(Config.device, Config.dtype) 
+    model = SingleStreamDiT(
+        in_channels=Config.in_channels,
+        patch_size=Config.patch_size,
+        hidden_size=Config.hidden_size,
+        depth=Config.depth,
+        num_heads=Config.num_heads,
+        text_embed_dim=Config.text_embed_dim,
+        gradient_checkpointing=Config.gradient_checkpointing,
+        refiner_depth=Config.refiner_depth,
+        max_token_length=Config.max_token_length,
+        dropout=Config.model_dropout,
+        rope_base=Config.rope_base,
+        use_xsa=Config.use_xsa
+    ).to(Config.device, Config.dtype)
     
     vae = load_vae()
     
