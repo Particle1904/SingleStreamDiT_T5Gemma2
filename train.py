@@ -160,7 +160,7 @@ def train():
     
     full_dataset = TextImageDataset()
     train_idx_set = set(range(len(full_dataset)))
-    train_buckets = {res: [i for i in id if i in train_idx_set] for res, idxs in full_dataset.buckets.items() if any(i in train_idx_set for i in idxs)}
+    train_buckets = {res: [i for i in idxs if i in train_idx_set] for res, idxs in full_dataset.buckets.items() if any(i in train_idx_set for i in idxs)}
     if accelerator.num_processes > 1:
         new_buckets = {}
         for res, indices in train_buckets.items():
