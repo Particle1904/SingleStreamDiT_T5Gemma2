@@ -121,9 +121,8 @@ class SwiGLU(nn.Module):
         return self.w3(x_gated)
 
 class VisualFusionBlock(nn.Module):
-    def __init__(self, hidden_size, num_heads, dropout=0.0, use_conv=False, use_xsa=True):
+    def __init__(self, hidden_size, num_heads, dropout=0.0, use_conv=False):
         super().__init__()
-        self.use_xsa = use_xsa
         self.num_heads = num_heads
         self.head_dim = hidden_size // num_heads
         
@@ -181,11 +180,6 @@ class VisualFusionBlock(nn.Module):
         
         attn_mask = attend_mask.unsqueeze(1).unsqueeze(2)
         
-        if self.use_xsa:
-            if not hasattr(self, '_diag_mask') or self._diag_mask.shape[-1] != N:
-                self._diag_mask = ~torch.eye(N, dtype=torch.bool, device=q.device).unsqueeze(0).unsqueeze(0)
-            attn_mask = attn_mask & self._diag_mask
-        
         attn = F.scaled_dot_product_attention(q, k, v, attn_mask=attn_mask)
         attn = attn.transpose(1, 2).reshape(B, N, C)
         
@@ -200,9 +194,8 @@ class VisualFusionBlock(nn.Module):
         return x
 
 class ContextRefinerBlock(nn.Module):
-    def __init__(self, hidden_size, num_heads, use_xsa=True):
+    def __init__(self, hidden_size, num_heads):
         super().__init__()
-        self.use_xsa = use_xsa
         self.num_heads = num_heads
         self.head_dim = hidden_size // num_heads
         
@@ -243,12 +236,7 @@ class ContextRefinerBlock(nn.Module):
         k = k.transpose(1, 2)
         
         attn_mask = attend_mask.unsqueeze(1).unsqueeze(2)
-        
-        if self.use_xsa:
-            if not hasattr(self, '_diag_mask') or self._diag_mask.shape[-1] != N:
-                self._diag_mask = ~torch.eye(N, dtype=torch.bool, device=q.device).unsqueeze(0).unsqueeze(0)
-            attn_mask = attn_mask & self._diag_mask
-        
+                        
         attn = F.scaled_dot_product_attention(q, k, v, attn_mask=attn_mask)
         attn = attn.transpose(1, 2).reshape(B, N, C)
         
@@ -270,15 +258,13 @@ class SingleStreamDiT(nn.Module):
                  refiner_depth=Config.refiner_depth,
                  max_token_length=Config.max_token_length,
                  dropout=Config.model_dropout,
-                 rope_base=Config.rope_base,
-                 use_xsa=Config.use_xsa):
+                 rope_base=Config.rope_base):
         super().__init__()
         self.gradient_checkpointing = gradient_checkpointing
         self.patch_size = patch_size
         self.in_channels = in_channels
         self.hidden_size = hidden_size
         self.head_dim = hidden_size // num_heads
-        self.use_xsa = use_xsa
         
         patch_dim = in_channels * (patch_size ** 2)
         self.x_embedder = nn.Linear(patch_dim, hidden_size)
@@ -298,17 +284,17 @@ class SingleStreamDiT(nn.Module):
         self.rope = Rope3D(self.head_dim, rope_base)
         
         self.noise_refiner = nn.ModuleList([
-            VisualFusionBlock(hidden_size, num_heads, dropout=dropout, use_conv=True, use_xsa=self.use_xsa) 
+            VisualFusionBlock(hidden_size, num_heads, dropout=dropout, use_conv=True) 
             for _ in range(refiner_depth)
         ])
         
         self.context_refiner = nn.ModuleList([
-            ContextRefinerBlock(hidden_size, num_heads, use_xsa=self.use_xsa) 
+            ContextRefinerBlock(hidden_size, num_heads) 
             for _ in range(refiner_depth)
         ])
         
         self.blocks = nn.ModuleList([
-            VisualFusionBlock(hidden_size, num_heads, dropout=dropout, use_conv=True, use_xsa=self.use_xsa) 
+            VisualFusionBlock(hidden_size, num_heads, dropout=dropout, use_conv=True) 
             for _ in range(depth)
         ])            
                 

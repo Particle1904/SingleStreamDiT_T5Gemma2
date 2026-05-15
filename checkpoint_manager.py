@@ -17,11 +17,11 @@ class CheckpointManager:
         
         token = getattr(config, 'hf_token', None)
         should_push = getattr(config, 'push_to_hub', False)
-        
-        if HAS_HF and should_push and token:
-            self.api = HfApi(token=token)
-            print(f"HF Checkpoint Sync Enabled -> {config.hf_repo_id}")
-        else:
+        try:
+            self.api = HfApi(token=token) 
+            print("DEBUG: HfApi initialized successfully.")
+        except Exception as e:
+            print(f"DEBUG: HfApi failed to initialize: {e}")
             self.api = None
         
     def setup_dirs(self):
@@ -29,7 +29,7 @@ class CheckpointManager:
         os.makedirs(self.config.samples_dir, exist_ok=True)
         os.makedirs(os.path.dirname(self.config.log_file), exist_ok=True)
 
-    def cleanup_local(self, prefix="full_state_", keep_last_n=3):
+    def cleanup_local(self, prefix="full_state_", keep_last_n=5):
         search_pattern = os.path.join(self.checkpoint_dir, f"{prefix}*.pt")
         files = glob.glob(search_pattern)
         
@@ -95,7 +95,7 @@ class CheckpointManager:
                 self._cleanup_hf(epoch)
 
         if not is_final:
-            self.cleanup_local(prefix="full_state_", keep_last_n=2)
+            self.cleanup_local(prefix="full_state_", keep_last_n=5)
 
     def load_run_id(self, path):
         if not os.path.exists(path):
@@ -178,7 +178,7 @@ class CheckpointManager:
             print(f"Upload failed: {e}")
 
     def _cleanup_hf(self, current_epoch):
-        keep_last = 2
+        keep_last = self.config.keep_last
         delete_epoch = current_epoch - (self.config.save_every * keep_last)
         
         if delete_epoch > 0:
@@ -198,17 +198,33 @@ class CheckpointManager:
         if requested_path == "latest":
             search_pattern = os.path.join(self.checkpoint_dir, "full_state_*.pt")
             files = glob.glob(search_pattern)
+            
+            if not files and self.api and self.config.hf_repo_id:
+                print("No local checkpoints. Checking HF for latest...")
+                try:
+                    repo_files = self.api.list_repo_files(repo_id=self.config.hf_repo_id)
+                    checkpoints =[f for f in repo_files if f.startswith("checkpoints/full_state_epoch_")]
+                    
+                    if checkpoints:
+                        def get_epoch(f):
+                            match = re.search(r"epoch_(\d+)", f)
+                            return int(match.group(1)) if match else -1
+                        latest_hf_file = max(checkpoints, key=get_epoch)
+                        return latest_hf_file.replace("checkpoints/", "") 
+                except Exception as e:
+                    print(f"Failed to fetch latest from HF: {e}")
+            
             if not files:
-                print(f"No full_state checkpoints found in {self.checkpoint_dir}")
+                print(f"No full_state checkpoints found locally or on HF.")
                 return None
+                
             def get_epoch_num(filepath):
                 match = re.search(r"epoch_(\d+)", filepath)
                 return int(match.group(1)) if match else -1
             latest_file = max(files, key=get_epoch_num)
-            print(f"Resolved 'latest' to: {os.path.basename(latest_file)}")
             return latest_file
+            
         elif os.path.exists(requested_path):
             return requested_path
         else:
-            print(f"Requested resume path does not exist: {requested_path}")
-            return None
+            return requested_path

@@ -6,7 +6,7 @@ def get_schedule(name, steps, device, rho=7.0):
         return torch.linspace(0.0, 1.0, steps + 1, device=device)
     elif name == "karras":
         steps_arr = torch.linspace(0.0, 1.0, steps + 1, device=device)
-        return torch.pow(steps_arr, rho)
+        return 1.0 - torch.pow(1.0 - steps_arr, rho)
     elif name == "beta":
         return torch.pow(torch.linspace(0.0, 1.0, steps + 1, device=device), 2.0)
     else:

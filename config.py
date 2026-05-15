@@ -34,7 +34,7 @@ class Config:
     log_file = os.path.join(log_dir, f"{project_name}_log.csv")    
     
     # Used by sanity_check / cache inspection utilities
-    target_filename = "39.pt"
+    target_filename = "1726.pt"
     target_file = os.path.join(cache_dir, target_filename)        
     # Resume training from a full checkpoint (model + optimizer + EMA)
     # Set to None for a fresh run or "latest" for HF model
@@ -64,7 +64,6 @@ class Config:
     patch_size = 2
     # Rotary embedding base
     rope_base = 10_000
-    use_xsa = False
     
     # ============================================================
     # REGION: EXTERNAL MODELS
@@ -115,8 +114,8 @@ class Config:
     batch_size = 32
     accum_steps = 2
     # Loss for velocity prediction
-    # Options: "mse", "l1", "huber". "edm"
-    loss_type = "edm"
+    # Options: "mse", "l1", "huber".
+    loss_type = "mse"
     
     # Transformer regularization
     model_dropout = 0.05
@@ -143,7 +142,7 @@ class Config:
     # Time parameterization and numerical integration
     # ============================================================
     # 3.0 for FLUX1 VAE, 4.63-6.93 for FLUX2 VAE
-    shift_val = 4.69    
+    shift_val = 6.93    
     
     # ============================================================
     # REGION: SELF-Evaluation (EXPERIMENTAL)
@@ -169,7 +168,7 @@ class Config:
     accelerator = None
     device = "cuda" if torch.cuda.is_available() else "cpu"
     # Cache entire dataset in RAM (recommended for <= ~20k images)
-    load_entire_dataset = True
+    load_entire_dataset = False
     num_workers = 2 if os.name != 'nt' else 0
     
     # ============================================================
@@ -199,7 +198,7 @@ class Config:
     # REGION: HUGGINGFACE INTEGRATION
     # ============================================================
     # How many checkpoints to keep in HF
-    keep_last = 4
+    keep_last = 5
     push_to_hub = False
     hf_repo_id = "Crowlley/SingleStreamDiT" 
     hf_token = os.environ.get("HF_TOKEN")

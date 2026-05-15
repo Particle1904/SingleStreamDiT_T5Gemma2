@@ -148,8 +148,7 @@ def train():
         refiner_depth=Config.refiner_depth,
         max_token_length=Config.max_token_length,
         dropout=Config.model_dropout,
-        rope_base=Config.rope_base,
-        use_xsa=Config.use_xsa
+        rope_base=Config.rope_base
     ).to(Config.device, Config.dtype)
     
     vae = load_vae()
@@ -161,7 +160,7 @@ def train():
     
     full_dataset = TextImageDataset()
     train_idx_set = set(range(len(full_dataset)))
-    train_buckets = {res: [i for i in idxs if i in train_idx_set] for res, idxs in full_dataset.buckets.items() if any(i in train_idx_set for i in idxs)}
+    train_buckets = {res: [i for i in id if i in train_idx_set] for res, idxs in full_dataset.buckets.items() if any(i in train_idx_set for i in idxs)}
     if accelerator.num_processes > 1:
         new_buckets = {}
         for res, indices in train_buckets.items():
@@ -233,6 +232,8 @@ def train():
         display_epoch = epoch + 1
         
         pbar = tqdm(train_loader, disable=not accelerator.is_main_process)
+        running_loss = 0.0
+        micro_steps = 0
         for step, batch in enumerate(pbar):
             with accelerator.accumulate(model):
                 x_t, t, x_1, target, text, text_mask = prepare_batch_and_targets(batch, Config.device, torch.float32,
@@ -246,6 +247,8 @@ def train():
                                                 Config.loss_type)
 
                 accelerator.backward(loss)
+                running_loss += loss.item()
+                micro_steps += 1
                                 
                 if accelerator.sync_gradients:
                     global_step += 1
@@ -257,7 +260,7 @@ def train():
                                         
                     if global_step % LOG_EVERY_STEPS == 0:
                         lr_current = optimizer.param_groups[0]['lr']
-                        curr_loss = loss.item()
+                        curr_loss = running_loss / micro_steps
                         self_eval_status = "On" if Config.use_self_eval and epoch > (Config.epochs * Config.start_self_eval_at) else "Off"
                         
                         pbar.set_description(f"Epoch {epoch}|Step {global_step}|Loss {curr_loss:.3f}|Loss {Config.loss_type}|LR {lr_current:.6f}|SE {self_eval_status}")
@@ -270,6 +273,9 @@ def train():
                             "lr": lr_current, 
                             "epoch": epoch
                         }, step=global_step)
+                        
+                    running_loss = 0.0
+                    micro_steps = 0
 
         if display_epoch > 0 and display_epoch % Config.validate_every == 0:
             validate(accelerator, model, vae, display_epoch, global_step, is_ema=False)
