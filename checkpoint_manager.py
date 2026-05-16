@@ -29,23 +29,25 @@ class CheckpointManager:
         os.makedirs(self.config.samples_dir, exist_ok=True)
         os.makedirs(os.path.dirname(self.config.log_file), exist_ok=True)
 
-    def cleanup_local(self, prefix="full_state_", keep_last_n=5):
+    def cleanup_local(self, prefix="full_state_", keep_last_n=None):
+        if keep_last_n is None:
+            keep_last_n = self.config.keep_last
+            
         search_pattern = os.path.join(self.checkpoint_dir, f"{prefix}*.pt")
         files = glob.glob(search_pattern)
-        
         if len(files) <= keep_last_n:
             return
-
+            
         def get_epoch_num(filepath):
             match = re.search(r"epoch_(\d+)", filepath)
             return int(match.group(1)) if match else -1
-
+            
         files.sort(key=get_epoch_num)
         
-        for f in files[:-keep_last_n]:
+        files_to_delete = files if keep_last_n == 0 else files[:-keep_last_n]
+        for f in files_to_delete:
             try:
                 os.remove(f)
-                
                 dir_name = os.path.dirname(f)
                 file_name = os.path.basename(f)
                 
@@ -55,22 +57,22 @@ class CheckpointManager:
                     ema_name = file_name.replace("full_state", "ema")
                     
                 ema_path = os.path.join(dir_name, ema_name)
-                
                 if os.path.exists(ema_path):
                     os.remove(ema_path)
-                    
             except OSError as e:
                 print(f"Error deleting checkpoint {f}: {e}")
 
     def save(self, epoch, global_step, model, ema_model, optimizer, scheduler, wandb_run_id, is_final=False):
         prefix = "full_state_final" if is_final else "full_state"
-        
         state_filename = f"{prefix}_epoch_{epoch}.pt"
         ema_filename = f"ema_epoch_{epoch}.pt"
-        
         save_path = os.path.join(self.checkpoint_dir, state_filename)
         ema_path = os.path.join(self.checkpoint_dir, ema_filename)
         
+        if not is_final:
+            keep_amount = max(0, self.config.keep_last - 1)
+            self.cleanup_local(prefix="full_state_", keep_last_n=keep_amount)
+
         full_state = {
             'epoch': epoch,
             'global_step': global_step,
@@ -80,9 +82,10 @@ class CheckpointManager:
             'scheduler_state_dict': scheduler.state_dict(),
             'wandb_run_id': wandb_run_id
         }
+        
         torch.save(full_state, save_path)
         print(f"Saved Full State: {state_filename}")
-
+        
         ema_state = ema_model.module.state_dict() if hasattr(ema_model, 'module') else ema_model.state_dict()
         torch.save(ema_state, ema_path)
         print(f"Saved EMA: {ema_filename}")
@@ -90,12 +93,8 @@ class CheckpointManager:
         if self.api:
             self._upload_to_hf(save_path, f"checkpoints/{state_filename}")
             self._upload_to_hf(ema_path, f"checkpoints/{ema_filename}")
-            
             if not is_final:
                 self._cleanup_hf(epoch)
-
-        if not is_final:
-            self.cleanup_local(prefix="full_state_", keep_last_n=5)
 
     def load_run_id(self, path):
         if not os.path.exists(path):

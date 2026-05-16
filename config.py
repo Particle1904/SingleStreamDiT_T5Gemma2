@@ -27,7 +27,7 @@ class Config:
         output_dir = "./output"
         cache_dir = "./cached_data"  
         print("Not in Kaggle kernel.")
-    dataset_dir = "./dataset"
+    dataset_dir = r"E:\Datasets\Danbooru Dataset\downloaded_images"
     checkpoint_dir = os.path.join(output_dir, "checkpoints")
     samples_dir = os.path.join(output_dir, "samples")
     log_dir = os.path.join(output_dir, "logs")
@@ -198,7 +198,7 @@ class Config:
     # REGION: HUGGINGFACE INTEGRATION
     # ============================================================
     # How many checkpoints to keep in HF
-    keep_last = 5
+    keep_last = 2 if is_kaggle else 5
     push_to_hub = False
     hf_repo_id = "Crowlley/SingleStreamDiT" 
     hf_token = os.environ.get("HF_TOKEN")
