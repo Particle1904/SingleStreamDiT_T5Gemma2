@@ -27,7 +27,7 @@ class Config:
         output_dir = "./output"
         cache_dir = "./cached_data"  
         print("Not in Kaggle kernel.")
-    dataset_dir = r"E:\Datasets\Danbooru Dataset\downloaded_images"
+    dataset_dir = "./dataset"
     checkpoint_dir = os.path.join(output_dir, "checkpoints")
     samples_dir = os.path.join(output_dir, "samples")
     log_dir = os.path.join(output_dir, "logs")
