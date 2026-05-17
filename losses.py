@@ -3,7 +3,7 @@ import math
 import torch.nn.functional as F
 from samplers import cfg_guided_position, predict_x1_from_velocity, get_1d_shifted_time  
 
-def prepare_batch_and_targets(batch, device, dtype, shift_val, offset_noise, loss_type):
+def prepare_batch_and_targets(batch, device, dtype, shift_val):
     x_1 = batch["latents"].to(device, dtype=dtype)
     text = batch["text_embeds"].to(device, dtype=dtype)
     text_mask = batch["text_mask"].to(device)
@@ -13,10 +13,7 @@ def prepare_batch_and_targets(batch, device, dtype, shift_val, offset_noise, los
     t = get_1d_shifted_time(u, shift_val)
     
     x_0 = torch.randn_like(x_1)
-    if offset_noise > 0:
-        offset = torch.randn(x_1.shape[0], x_1.shape[1], 1, 1, device=device, dtype=dtype)
-        x_0 = x_0 + offset_noise * offset
-        
+               
     x_t = (1.0 - t.view(-1,1,1,1)) * x_0 + t.view(-1,1,1,1) * x_1
     target = x_1 - x_0
     
@@ -24,13 +21,13 @@ def prepare_batch_and_targets(batch, device, dtype, shift_val, offset_noise, los
 
 def get_base_loss(v_pred, target, loss_type):
     if loss_type == "mse":
-        return F.mse_loss(v_pred, target)
+        return F.mse_loss(v_pred, target, reduction='none').mean(dim=(1, 2, 3))
     elif loss_type == "l1":
-        return F.l1_loss(v_pred, target)
+        return F.l1_loss(v_pred, target, reduction='none').mean(dim=(1, 2, 3))
     elif loss_type == "huber":
-        return F.huber_loss(v_pred, target, delta=0.1)
+        return F.huber_loss(v_pred, target, delta=0.1, reduction='none').mean(dim=(1, 2, 3))
     else:
-        return F.mse_loss(v_pred, target)
+        return F.mse_loss(v_pred, target, reduction='none').mean(dim=(1, 2, 3))
 
 def get_fourier_amplitude_loss(x_hat_1, x_1, t, fal_lambda=0.05):
     time_weight = t.view(-1, 1, 1, 1) ** 2
@@ -39,12 +36,12 @@ def get_fourier_amplitude_loss(x_hat_1, x_1, t, fal_lambda=0.05):
     x_true_fft = torch.fft.fft2(x_1.float(), dim=(-2, -1), norm='ortho')
     
     loss_fal_raw = F.mse_loss(torch.abs(x_hat_fft), torch.abs(x_true_fft), reduction='none')
-    loss_fal = (loss_fal_raw * time_weight).mean()
+    loss_fal = (loss_fal_raw * time_weight).mean(dim=(1, 2, 3))
     
     return fal_lambda * loss_fal
 
 def get_fourier_correlation_loss(x_hat_1, x_1, t, fcl_lambda=0.05):
-    time_weight = t.view(-1, 1, 1, 1) ** 2
+    time_weight = t.view(-1) ** 2
     
     x_hat_flat = x_hat_1.view(x_hat_1.size(0), -1).float()
     x_1_flat = x_1.view(x_1.size(0), -1).float()
@@ -52,7 +49,7 @@ def get_fourier_correlation_loss(x_hat_1, x_1, t, fcl_lambda=0.05):
     correlation = F.cosine_similarity(x_hat_flat, x_1_flat, dim=1)
     loss_fcl_raw = 1.0 - correlation.clamp(-1.0, 1.0)
     
-    loss_fcl = (loss_fcl_raw.view(-1, 1, 1, 1) * time_weight).mean()
+    loss_fcl = loss_fcl_raw * time_weight
     
     return fcl_lambda * loss_fcl
 
@@ -82,7 +79,7 @@ def get_self_eval_loss(x_hat_1, x_1, t, s, ema_model, text, text_mask, self_eval
         
         x_renorm = target_raw * norm_factor
     
-    loss_self = F.mse_loss(x_hat_1, x_renorm.detach())
+    loss_self = F.mse_loss(x_hat_1, x_renorm.detach(), reduction='none').mean(dim=(1, 2, 3))
     
     return loss_self * self_eval_lambda
 

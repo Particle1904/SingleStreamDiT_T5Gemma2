@@ -178,9 +178,7 @@ class VisualFusionBlock(nn.Module):
         q = q.transpose(1, 2)
         k = k.transpose(1, 2)
         
-        attn_mask = attend_mask.unsqueeze(1).unsqueeze(2)
-        
-        attn = F.scaled_dot_product_attention(q, k, v, attn_mask=attn_mask)
+        attn = F.scaled_dot_product_attention(q, k, v)
         attn = attn.transpose(1, 2).reshape(B, N, C)
         
         x = x + gate_msa.unsqueeze(1) * self.dropout(self.attention_out(attn))
@@ -234,10 +232,8 @@ class ContextRefinerBlock(nn.Module):
             
         q = q.transpose(1, 2)
         k = k.transpose(1, 2)
-        
-        attn_mask = attend_mask.unsqueeze(1).unsqueeze(2)
                         
-        attn = F.scaled_dot_product_attention(q, k, v, attn_mask=attn_mask)
+        attn = F.scaled_dot_product_attention(q, k, v)
         attn = attn.transpose(1, 2).reshape(B, N, C)
         
         x = x + self.attention_out(attn)

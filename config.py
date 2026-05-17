@@ -121,7 +121,6 @@ class Config:
     model_dropout = 0.05
     weight_decay = 0.05
     optimizer_warmup = 0.05
-    offset_noise = 0.05
     # Drop text conditioning during training (CFG support)    
     text_dropout = 0.15
     # Random horizontal flip in latent space

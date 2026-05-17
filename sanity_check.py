@@ -159,20 +159,21 @@ def sanity():
             "text_mask": text_mask
         }
         x_t, t, x_1, target, text_for_model, mask_for_model = prepare_batch_and_targets(batch_data, DEVICE, Config.dtype, 
-                                                                        Config.shift_val, Config.offset_noise, Config.loss_type)
+                                                                        Config.shift_val)
         
         with torch.autocast(device_type=DEVICE, dtype=Config.dtype):
             if USE_SELF_EVAL and step > (STEPS * Config.start_self_eval_at):
                  with torch.no_grad():
-                    loss = calculate_total_loss(model, ema_model, x_t, t, x_1, target, text_for_model, mask_for_model, 
+                    loss_batch = calculate_total_loss(model, ema_model, x_t, t, x_1, target, text_for_model, mask_for_model, 
                                                 step, STEPS, USE_SELF_EVAL, Config.start_self_eval_at, 
                                                 Config.self_eval_lambda, Config.fal_lambda, Config.fcl_lambda, 
                                                 Config.loss_type)
             else:
-                loss = calculate_total_loss(model, ema_model, x_t, t, x_1, target, text_for_model, mask_for_model, 
+                loss_batch = calculate_total_loss(model, ema_model, x_t, t, x_1, target, text_for_model, mask_for_model, 
                                             step, STEPS, USE_SELF_EVAL, Config.start_self_eval_at, 
                                             Config.self_eval_lambda, Config.fal_lambda, Config.fcl_lambda, 
                                             Config.loss_type)
+            loss = loss_batch.mean()
                 
         optimizer.zero_grad()
         loss.backward()
@@ -180,12 +181,19 @@ def sanity():
         scheduler.step()
         ema_model.update_parameters(model)
         
+        binned_logs = {}
+        with torch.no_grad():
+            t_flat = t.view(-1)
+            if (t_flat < 0.33).any(): binned_logs["loss_t_noise"] = loss_batch[t_flat < 0.33].mean().item()
+            if ((t_flat >= 0.33) & (t_flat < 0.66)).any(): binned_logs["loss_t_mid"] = loss_batch[(t_flat >= 0.33) & (t_flat < 0.66)].mean().item()
+            if (t_flat >= 0.66).any(): binned_logs["loss_t_image"] = loss_batch[t_flat >= 0.66].mean().item()
+        
         lr_current = optimizer.param_groups[0]['lr']
         self_eval_status = "On" if USE_SELF_EVAL and step > (STEPS * Config.start_self_eval_at) else "Off"     
         
-        wandb.log({"loss": loss.item(),
-                   "lr": lr_current}, 
-                  step=step)
+        log_dict = {"loss": loss.item(), "lr": lr_current}
+        log_dict.update(binned_logs)
+        wandb.log(log_dict, step=step)
         
         pbar.set_description(f"Step {step}|Loss {loss.item():.3f}|Loss {Config.loss_type}|LR {lr_current:.6f}|Self-E {self_eval_status}|")
                             

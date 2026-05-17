@@ -234,22 +234,35 @@ def train():
         pbar = tqdm(train_loader, disable=not accelerator.is_main_process)
         running_loss = 0.0
         micro_steps = 0
+        binned_sums = {"loss_t_noise": 0.0, "loss_t_mid": 0.0, "loss_t_image": 0.0}
+        binned_counts = {"loss_t_noise": 0, "loss_t_mid": 0, "loss_t_image": 0}
         for step, batch in enumerate(pbar):
             with accelerator.accumulate(model):
                 x_t, t, x_1, target, text, text_mask = prepare_batch_and_targets(batch, Config.device, torch.float32,
-                                                                                 Config.shift_val, Config.offset_noise,
-                                                                                 Config.loss_type)
+                                                                                 Config.shift_val)
                 
                 with accelerator.autocast():
-                    loss = calculate_total_loss(model, ema_model, x_t, t, x_1, target, text, text_mask, epoch, 
+                    loss_batch = calculate_total_loss(model, ema_model, x_t, t, x_1, target, text, text_mask, epoch, 
                                                 Config.epochs, Config.use_self_eval, Config.start_self_eval_at, 
                                                 Config.self_eval_lambda, Config.fal_lambda, Config.fcl_lambda, 
                                                 Config.loss_type)
+                    loss = loss_batch.mean()
 
                 accelerator.backward(loss)
                 running_loss += loss.item()
                 micro_steps += 1
-                                
+                         
+                with torch.no_grad():
+                    t_flat = t.view(-1)
+                    for mask, key in [
+                        (t_flat < 0.33, "loss_t_noise"),
+                        ((t_flat >= 0.33) & (t_flat < 0.66), "loss_t_mid"),
+                        (t_flat >= 0.66, "loss_t_image")
+                    ]:
+                        if mask.any():
+                            binned_sums[key] += loss_batch[mask].mean().item()
+                            binned_counts[key] += 1
+                       
                 if accelerator.sync_gradients:
                     global_step += 1
                     accelerator.clip_grad_norm_(model.parameters(), max_norm=1.0)
@@ -268,11 +281,21 @@ def train():
                         if accelerator.is_main_process:
                             logger.log(epoch, global_step, curr_loss, lr_current)
                         
-                        accelerator.log({
+                        log_dict = {
                             "loss": curr_loss,
                             "lr": lr_current, 
                             "epoch": epoch
-                        }, step=global_step)
+                        }
+                        for k in binned_sums.keys():
+                            if binned_counts[k] > 0:
+                                log_dict[k] = binned_sums[k] / binned_counts[k]
+                                
+                        accelerator.log(log_dict, step=global_step)
+                        
+                        running_loss = 0.0
+                        micro_steps = 0
+                        binned_sums = {k: 0.0 for k in binned_sums}
+                        binned_counts = {k: 0 for k in binned_counts}
                         
                     running_loss = 0.0
                     micro_steps = 0
