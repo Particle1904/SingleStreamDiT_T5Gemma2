@@ -72,8 +72,9 @@ def validate(accelerator, model, vae, epoch, global_step, is_ema=False):
         text_embeds = data["text_embeds"].unsqueeze(0).to(Config.device, Config.dtype)
         text_mask = data["attention_mask"].unsqueeze(0).to(Config.device)
     uncond_embeds = torch.zeros_like(text_embeds)
+    uncond_mask = torch.ones_like(text_mask)
     combined_text_embeds = torch.cat([uncond_embeds, text_embeds], dim=0)
-    combined_mask = torch.cat([text_mask, text_mask], dim=0)
+    combined_mask = torch.cat([uncond_mask, text_mask], dim=0)
 
     torch_generator = torch.Generator(device=Config.device).manual_seed(Config.seed)
     initial_noise = torch.randn(1, Config.in_channels, h // Config.vae_downsample_factor, 
@@ -86,7 +87,7 @@ def validate(accelerator, model, vae, epoch, global_step, is_ema=False):
                                               steps=Config.validate_steps, 
                                               combined_text_embeds=combined_text_embeds, cfg=Config.validate_cfg, 
                                               text_mask=combined_mask, sampler_type=Config.validate_sampler, 
-                                              schedule_type=Config.validate_scheduler, shift_val=Config.shift_val)
+                                              scheduler_type=Config.validate_scheduler, shift_val=Config.shift_val)
        
     image = decode_latents_to_image(vae_model=vae, latents=final_latents, device=Config.device)
     
@@ -156,6 +157,7 @@ def train():
     model.initialize_weights()
     print_model_parameters(model)
     ema_model = AveragedModel(model.float(), multi_avg_fn=get_ema_multi_avg_fn(Config.ema_decay))
+    ema_model.eval()
     ema_model.requires_grad_(False)
     
     full_dataset = TextImageDataset()
@@ -198,6 +200,13 @@ def train():
             resumed = True
             if Config.reset_optimizer:
                 print(f"Resetting Scheduler for remaining epochs: {Config.epochs - start_epoch}")
+                remaining_epochs = Config.epochs - start_epoch
+                if remaining_epochs < 1:
+                    remaining_epochs = 10
+                new_total_steps = steps_per_epoch * remaining_epochs
+                new_warmup = int(new_total_steps * Config.optimizer_warmup)
+                scheduler = get_cosine_schedule_with_warmup(optimizer, num_warmup_steps=new_warmup, 
+                                                            num_training_steps=new_total_steps)
         else:
             print(f"Could not resolve resume path: {Config.resume_from}")
             
@@ -212,6 +221,13 @@ def train():
             
             scheduler = get_cosine_schedule_with_warmup(optimizer, num_warmup_steps=new_warmup, num_training_steps=new_total_steps)
 
+    if sys.platform.startswith('linux') and Config.compile_model:
+        try:
+            model = torch.compile(model, mode="max-autotune")
+            print("Successfully compiled model.")
+        except Exception as e: 
+            print(f"Compilation bypassed: {e}")
+
     model, optimizer, scheduler = accelerator.prepare(model, optimizer, scheduler)
     unwrapped_model = accelerator.unwrap_model(model)
     if not resumed:
@@ -219,12 +235,6 @@ def train():
             ema_model.module.load_state_dict(unwrapped_model.state_dict())
         else:
             ema_model.load_state_dict(unwrapped_model.state_dict())
-       
-    if sys.platform.startswith('linux') and Config.compile_model:
-        try:
-            model = torch.compile(model, mode="max-autotune")
-        except: 
-            pass
 
     logger = CSVLogger(Config.log_file, resume=(Config.resume_from is not None))
 
@@ -242,10 +252,7 @@ def train():
                                                                                  Config.shift_val)
                 
                 with accelerator.autocast():
-                    loss_batch = calculate_total_loss(model, ema_model, x_t, t, x_1, target, text, text_mask, epoch, 
-                                                Config.epochs, Config.use_self_eval, Config.start_self_eval_at, 
-                                                Config.self_eval_lambda, Config.fal_lambda, Config.fcl_lambda, 
-                                                Config.loss_type)
+                    loss_batch = calculate_total_loss(model, x_t, t, target, text, text_mask, Config.loss_type)
                     loss = loss_batch.mean()
 
                 accelerator.backward(loss)
@@ -274,9 +281,8 @@ def train():
                     if global_step % LOG_EVERY_STEPS == 0:
                         lr_current = optimizer.param_groups[0]['lr']
                         curr_loss = running_loss / micro_steps
-                        self_eval_status = "On" if Config.use_self_eval and epoch > (Config.epochs * Config.start_self_eval_at) else "Off"
                         
-                        pbar.set_description(f"Epoch {epoch}|Step {global_step}|Loss {curr_loss:.3f}|Loss {Config.loss_type}|LR {lr_current:.6f}|SE {self_eval_status}")
+                        pbar.set_description(f"Epoch {epoch}|Step {global_step}|Loss {curr_loss:.3f}|Loss {Config.loss_type}|LR {lr_current:.6f}")
                         
                         if accelerator.is_main_process:
                             logger.log(epoch, global_step, curr_loss, lr_current)
@@ -296,9 +302,6 @@ def train():
                         micro_steps = 0
                         binned_sums = {k: 0.0 for k in binned_sums}
                         binned_counts = {k: 0 for k in binned_counts}
-                        
-                    running_loss = 0.0
-                    micro_steps = 0
 
         if display_epoch > 0 and display_epoch % Config.validate_every == 0:
             validate(accelerator, model, vae, display_epoch, global_step, is_ema=False)

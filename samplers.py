@@ -16,7 +16,7 @@ def get_1d_shifted_time(t, shift_val):
     if shift_val == 1.0:
         return t
     s = 1.0 / shift_val
-    
+     
     return (t * s) / (1 + (s - 1) * t)
 
 def cfg_velocity(model, x, t, text_embeds, cfg, text_mask=None):
@@ -44,20 +44,12 @@ def dpm_solver_pp_step(model, x, t, t_next, text_embeds, cfg, text_mask):
     v_next = cfg_velocity(model, x_mid, t_next, text_embeds, cfg, text_mask)
     return x + (h / 2.0) * (v_curr + v_next)
 
-def predict_x1_from_velocity(x, t, v):
-    return x + (1.0 - t.view(-1, 1, 1, 1)) * v
-
-# Used for SELF-EVAL
-def cfg_guided_position(model, x, t, text_embeds, cfg=1.0, text_mask=None):
-    v = cfg_velocity(model, x, t, text_embeds, cfg, text_mask=text_mask)
-    return predict_x1_from_velocity(x, t, v)
-
 def run_sampling_pipeline(model, initial_noise, steps, combined_text_embeds, cfg, sampler_type="euler", 
-                          schedule_type="uniform", shift_val=1.0, text_mask=None):
+                          scheduler_type="uniform", shift_val=1.0, text_mask=None):
     x = initial_noise.clone()
     device = initial_noise.device
     
-    raw_timesteps = get_schedule(schedule_type, steps, device)
+    raw_timesteps = get_schedule(scheduler_type, steps, device)
     timesteps = get_1d_shifted_time(raw_timesteps, shift_val)
     
     for i in range(steps):

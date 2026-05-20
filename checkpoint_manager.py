@@ -135,13 +135,19 @@ class CheckpointManager:
         print(f"Resuming from {path}...")
         checkpoint = torch.load(path, map_location=self.config.device)
         
-        model.load_state_dict(checkpoint['model_state_dict'])
+        model.load_state_dict(checkpoint['model_state_dict'], strict=False)
         
         if 'ema_state_dict' in checkpoint:
             if hasattr(ema_model, 'module'):
                 ema_model.module.load_state_dict(checkpoint['ema_state_dict'])
             else:
                 ema_model.load_state_dict(checkpoint['ema_state_dict'])
+        else:
+            print("No EMA state found in checkpoint. Initializing EMA to main model weights.")
+            if hasattr(ema_model, 'module'):
+                ema_model.module.load_state_dict(model.state_dict())
+            else:
+                ema_model.load_state_dict(model.state_dict())
         
         if optimizer is not None and 'optimizer_state_dict' in checkpoint:
             try:

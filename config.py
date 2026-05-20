@@ -141,26 +141,8 @@ class Config:
     # Time parameterization and numerical integration
     # ============================================================
     # 3.0 for FLUX1 VAE, 4.63-6.93 for FLUX2 VAE
-    shift_val = 6.93    
-    
-    # ============================================================
-    # REGION: SELF-Evaluation (EXPERIMENTAL)
-    # Teacher–student consistency regularization
-    # ============================================================
-    # Enable Self-Evaluation (recommended OFF for initial training)
-    use_self_eval = False
-    # Fraction of total epochs before Self-Evaluation activates
-    start_self_eval_at = 0.85
-    # Strength of self-evaluation loss
-    self_eval_lambda = 0.3
-    
-    # ============================================================
-    # REGION: FOURIER LOSSES
-    # Fourier Amplitude Loss lambda
-    fal_lambda = 0.0
-    # Fourier Correlation Loss lambda
-    fcl_lambda = 0.0
-                
+    shift_val = 4.63   
+                    
     # ============================================================
     # REGION: SYSTEM & DATALOADING
     # ============================================================

@@ -6,73 +6,45 @@ from torch.utils.checkpoint import checkpoint
 from functools import lru_cache
 from config import Config
 
-class Rope3D(nn.Module):
+def get_2d_sincos_pos_embed(embed_dim, grid_h, grid_w, device):
+    grid_y, grid_x = torch.meshgrid(torch.arange(grid_h, device=device), 
+                                    torch.arange(grid_w, device=device), indexing='ij')
+    
+    dim = embed_dim // 2
+    omega = 1.0 / (10000 ** (torch.arange(0, dim, 2, device=device).float() / dim))
+    
+    out_y = torch.outer(grid_y.flatten().float(), omega)
+    emb_y = torch.cat([out_y.sin(), out_y.cos()], dim=-1)
+    
+    out_x = torch.outer(grid_x.flatten().float(), omega)
+    emb_x = torch.cat([out_x.sin(), out_x.cos()], dim=-1)
+    
+    return torch.cat([emb_y, emb_x], dim=-1)
+
+class RoPE1D(nn.Module):
     def __init__(self, head_dim, theta=10000.0):
         super().__init__()
         self.head_dim = head_dim
         self.theta = theta
-       
-        self.dim_0 = (head_dim // 4) // 2 * 2
-        rem = head_dim - self.dim_0
-        self.dim_1 = (rem // 2) // 2 * 2
-        self.dim_2 = head_dim - self.dim_0 - self.dim_1
-       
-        assert self.dim_0 % 2 == 0 and self.dim_1 % 2 == 0 and self.dim_2 % 2 == 0
-        assert self.dim_0 + self.dim_1 + self.dim_2 == head_dim
 
-    def forward(self, seq_len_text, h, w, device):
-        text_ids = torch.arange(seq_len_text, device=device, dtype=torch.float32).unsqueeze(1)
-        zeros_text = torch.zeros_like(text_ids)
-        grid_text = torch.cat([text_ids, zeros_text, zeros_text], dim=1) 
+    def forward(self, seq_len, device):
+        positions = torch.arange(seq_len, device=device, dtype=torch.float32)
+        inv_freq = 1.0 / (self.theta ** (torch.arange(0, self.head_dim, 2, device=device).float() / self.head_dim))
+        freqs = torch.outer(positions, inv_freq)
+        return torch.cat([freqs.cos(), freqs.sin()], dim=-1)
 
-        y = torch.arange(h, device=device, dtype=torch.float32)
-        x = torch.arange(w, device=device, dtype=torch.float32)
-        mesh_y, mesh_x = torch.meshgrid(y, x, indexing='ij')
-        
-        flat_y = mesh_y.flatten().unsqueeze(1)
-        flat_x = mesh_x.flatten().unsqueeze(1)
-        time_img = torch.full_like(flat_y, seq_len_text) 
-        grid_img = torch.cat([time_img, flat_y, flat_x], dim=1)
-        grid = torch.cat([grid_text, grid_img], dim=0)
-        
-        def get_freqs(dim, positions):
-            inv_freq = 1.0 / (self.theta ** (torch.arange(0, dim, 2, device=positions.device).float() / dim))
-            freqs = torch.outer(positions, inv_freq)
-            return torch.cat([freqs.cos(), freqs.sin()], dim=-1)
-
-        freqs_0 = get_freqs(self.dim_0, grid[:, 0])
-        freqs_1 = get_freqs(self.dim_1, grid[:, 1])
-        freqs_2 = get_freqs(self.dim_2, grid[:, 2])
-        
-        return freqs_0, freqs_1, freqs_2
-
-def apply_rope_3d(x, freqs_0, freqs_1, freqs_2):
-    d0 = freqs_0.shape[-1]
-    d1 = freqs_1.shape[-1]
-   
-    x0 = x[..., :d0]
-    x1 = x[..., d0 : d0+d1]
-    x2 = x[..., d0+d1:]
-   
-    def rotate(x_chunk, f):
-        f = f.unsqueeze(0).unsqueeze(2)
-        half = f.shape[-1] // 2
-        cos = f[..., :half].to(x_chunk.dtype)
-        sin = f[..., half:].to(x_chunk.dtype)
-       
-        x_even = x_chunk[..., ::2]
-        x_odd  = x_chunk[..., 1::2]
-       
-        x_rot_even = x_even * cos - x_odd * sin
-        x_rot_odd  = x_even * sin + x_odd * cos
-       
-        return torch.stack((x_rot_even, x_rot_odd), dim=-1).reshape(x_chunk.shape)
-   
-    x0 = rotate(x0, freqs_0)
-    x1 = rotate(x1, freqs_1)
-    x2 = rotate(x2, freqs_2)
-   
-    return torch.cat([x0, x1, x2], dim=-1)
+def apply_rope_1d(x, freqs):
+    f = freqs.unsqueeze(0).unsqueeze(1)
+    half = f.shape[-1] // 2
+    cos = f[..., :half].to(x.dtype)
+    sin = f[..., half:].to(x.dtype)
+    
+    x1 = x[..., :half]
+    x2 = x[..., half:]
+    
+    x_rot_1 = x1 * cos - x2 * sin
+    x_rot_2 = x1 * sin + x2 * cos
+    return torch.cat([x_rot_1, x_rot_2], dim=-1)
 
 class RMSNorm(nn.Module):
     def __init__(self, dim, eps=1e-6):
@@ -84,7 +56,7 @@ class RMSNorm(nn.Module):
         x_float = x.float()
         var = torch.mean(x_float ** 2, dim=-1, keepdim=True)
         x_norm = x_float * torch.rsqrt(var + self.eps)
-        return self.weight * x_norm.to(x.dtype)
+        return (self.weight.to(x.dtype) * x_norm.to(x.dtype))
     
 class SwiGLU(nn.Module):
     def __init__(self, dim, hidden_dim, multiple_of=256, use_conv=False):
@@ -140,56 +112,53 @@ class VisualFusionBlock(nn.Module):
             
         self.adaLN_msa = nn.Sequential(nn.SiLU(), nn.Linear(hidden_size, 3 * hidden_size, bias=True))
         self.adaLN_mlp = nn.Sequential(nn.SiLU(), nn.Linear(hidden_size, 3 * hidden_size, bias=True))
-        
-        nn.init.constant_(self.adaLN_msa[-1].weight, 0); 
-        nn.init.constant_(self.adaLN_msa[-1].bias, 0)
-        
-        nn.init.constant_(self.adaLN_mlp[-1].weight, 0); 
-        nn.init.constant_(self.adaLN_mlp[-1].bias, 0)
-        
         self.dropout = nn.Dropout(dropout)
 
-    def forward(self, x, c, f0, f1, f2, seq_len_text, grid_h, grid_w, attend_mask=None):
+    def forward(self, x, c, freqs, seq_len_text, grid_h, grid_w, attend_mask=None):
         B, N, C = x.shape
-        
         if attend_mask is None:
             attend_mask = torch.ones(B, N, dtype=torch.bool, device=x.device)
-        
+            
         shift_msa, scale_msa, gate_msa = self.adaLN_msa(c).chunk(3, dim=1)
         shift_mlp, scale_mlp, gate_mlp = self.adaLN_mlp(c).chunk(3, dim=1)
         
         x_norm = self.attention_norm1(x)
-        x_modulated = x_norm * (1 + scale_msa.unsqueeze(1)) + shift_msa.unsqueeze(1)
-        
+        if seq_len_text > 0:
+            x_txt = x_norm[:, :seq_len_text]
+            x_img = x_norm[:, seq_len_text:]
+            x_img_mod = x_img * (1 + scale_msa.unsqueeze(1)) + shift_msa.unsqueeze(1)
+            x_modulated = torch.cat([x_txt, x_img_mod], dim=1)
+        else:
+            x_modulated = x_norm * (1 + scale_msa.unsqueeze(1)) + shift_msa.unsqueeze(1)
+
         q = self.attention_q(x_modulated).reshape(B, N, self.num_heads, self.head_dim).permute(0, 2, 1, 3)
         k = self.attention_k(x_modulated).reshape(B, N, self.num_heads, self.head_dim).permute(0, 2, 1, 3)
         v = self.attention_v(x_modulated).reshape(B, N, self.num_heads, self.head_dim).permute(0, 2, 1, 3)
-
+        
         q = self.attention_norm_q(q)
         k = self.attention_norm_k(k)
         
-        q = q.transpose(1, 2)
-        k = k.transpose(1, 2)
-        
-        if f0 is not None:
-            q = apply_rope_3d(q, f0, f1, f2)
-            k = apply_rope_3d(k, f0, f1, f2)
+        if freqs is not None:
+            q = apply_rope_1d(q, freqs)
+            k = apply_rope_1d(k, freqs)
             
-        q = q.transpose(1, 2)
-        k = k.transpose(1, 2)
-        
         attn_mask = attend_mask.unsqueeze(1).unsqueeze(2)
         attn = F.scaled_dot_product_attention(q, k, v, attn_mask=attn_mask)
         attn = attn.transpose(1, 2).reshape(B, N, C)
-        
         x = x + gate_msa.unsqueeze(1) * self.dropout(self.attention_out(attn))
         
         x_norm_ffn = self.ffn_norm1(x)
-        x_modulated_ffn = x_norm_ffn * (1 + scale_mlp.unsqueeze(1)) + shift_mlp.unsqueeze(1)
-        ffn_out = self.feed_forward(x_modulated_ffn, seq_len_text, grid_h, grid_w)
-        
-        x = x + gate_mlp.unsqueeze(1) * self.dropout(ffn_out)
+        if seq_len_text > 0:
+            x_txt_ffn = x_norm_ffn[:, :seq_len_text]
+            x_img_ffn = x_norm_ffn[:, seq_len_text:]
+            x_img_mod_ffn = x_img_ffn * (1 + scale_mlp.unsqueeze(1)) + shift_mlp.unsqueeze(1)
+            x_modulated_ffn = torch.cat([x_txt_ffn, x_img_mod_ffn], dim=1)
+        else:
+            x_modulated_ffn = x_norm_ffn * (1 + scale_mlp.unsqueeze(1)) + shift_mlp.unsqueeze(1)
             
+        ffn_out = self.feed_forward(x_modulated_ffn, seq_len_text, grid_h, grid_w)
+        x = x + gate_mlp.unsqueeze(1) * self.dropout(ffn_out)
+        
         return x
 
 class ContextRefinerBlock(nn.Module):
@@ -209,7 +178,7 @@ class ContextRefinerBlock(nn.Module):
         self.attention_out = nn.Linear(hidden_size, hidden_size, bias=False)
         self.feed_forward = SwiGLU(hidden_size, hidden_size * 4.0)
 
-    def forward(self, x, f0, f1, f2, attend_mask=None):
+    def forward(self, x, freqs, attend_mask=None):
         B, N, C = x.shape
         
         if attend_mask is None:
@@ -224,16 +193,10 @@ class ContextRefinerBlock(nn.Module):
         q = self.attention_norm_q(q)
         k = self.attention_norm_k(k)
         
-        q = q.transpose(1, 2)
-        k = k.transpose(1, 2)
-        
-        if f0 is not None:
-            q = apply_rope_3d(q, f0, f1, f2)
-            k = apply_rope_3d(k, f0, f1, f2)
-            
-        q = q.transpose(1, 2)
-        k = k.transpose(1, 2)
-        
+        if freqs is not None:
+            q = apply_rope_1d(q, freqs)
+            k = apply_rope_1d(k, freqs)
+                    
         attn_mask = attend_mask.unsqueeze(1).unsqueeze(2)
         attn = F.scaled_dot_product_attention(q, k, v, attn_mask=attn_mask)
         attn = attn.transpose(1, 2).reshape(B, N, C)
@@ -279,7 +242,7 @@ class SingleStreamDiT(nn.Module):
             nn.Linear(hidden_size, hidden_size)
         )
         
-        self.rope = Rope3D(self.head_dim, rope_base)
+        self.rope = RoPE1D(self.head_dim, rope_base)
         
         self.noise_refiner = nn.ModuleList([
             VisualFusionBlock(hidden_size, num_heads, dropout=dropout, use_conv=True) 
@@ -305,69 +268,64 @@ class SingleStreamDiT(nn.Module):
         B, C, H, W = x.shape
         p = self.patch_size
         grid_h, grid_w = H // p, W // p
-        
-        # 1. Embed Inputs
+
         x = self.patchify(x)
         x = self.x_embedder(x)
         
+        pos_embed = get_2d_sincos_pos_embed(self.hidden_size, grid_h, grid_w, x.device)
+        x = x + pos_embed.unsqueeze(0).to(x.dtype)
+
         is_null = (text_embeds.abs().sum(dim=(1, 2)) == 0)
         context = self.cap_embedder(text_embeds)
-        
-        seq_len_text = context.shape[1]
-        if text_mask is None:
-            text_mask = torch.ones(B, seq_len_text, dtype=torch.bool, device=x.device)
         
         if is_null.any():
             null_mask = is_null.view(-1, 1, 1)
             context = torch.where(null_mask, self.cap_pad_token.expand_as(context), context)
+            
+        seq_len_text = context.shape[1]
         
+        if text_mask is None:
+            text_mask = torch.ones(B, seq_len_text, dtype=torch.bool, device=x.device)
+        else:
+            text_mask = text_mask.bool()
+            
         img_len = grid_h * grid_w
         full_mask = torch.cat([text_mask, torch.ones(B, img_len, dtype=torch.bool, device=x.device)], dim=1)
         
         t_freq = self.timestep_embedding(t, 256)
         t_emb = self.t_embedder(t_freq.to(x.dtype))
-        
-        # 2. Generate 3D RoPE Frequencies
-        f0, f1, f2 = self.rope(seq_len_text, grid_h, grid_w, x.device)
-        
-        # 3. Refiner Stages (Separate Streams)
-        f0_txt, f0_img = f0[:seq_len_text], f0[seq_len_text:]
-        f1_txt, f1_img = f1[:seq_len_text], f1[seq_len_text:]
-        f2_txt, f2_img = f2[:seq_len_text], f2[seq_len_text:]
-        
+
+        total_len = seq_len_text + img_len
+        freqs = self.rope(total_len, x.device)
+        freqs_txt = freqs[:seq_len_text]
+        freqs_img = freqs[seq_len_text:]
+
         for block in self.noise_refiner:
             if self.gradient_checkpointing:
-                x = checkpoint(block, x, t_emb, f0_img, f1_img, f2_img, 0, grid_h, grid_w,
-                               attend_mask=None, use_reentrant=False)
+                x = checkpoint(block, x, t_emb, freqs_img, 0, grid_h, grid_w,
+                               None, use_reentrant=False)
             else:
-                x = block(x, t_emb, f0_img, f1_img, f2_img, 0, grid_h, grid_w)
-                
+                x = block(x, t_emb, freqs_img, 0, grid_h, grid_w)
+
         for block in self.context_refiner:
             if self.gradient_checkpointing:
-                context = checkpoint(block, context, f0_txt, f1_txt, f2_txt, 
-                                     attend_mask=text_mask, use_reentrant=False)
+                context = checkpoint(block, context, freqs_txt, text_mask, use_reentrant=False)
             else:
-                context = block(context, f0_txt, f1_txt, f2_txt, attend_mask=text_mask)
-                
-        # 4. Fusion
+                context = block(context, freqs_txt, attend_mask=text_mask)
+
         x_concat = torch.cat([context, x], dim=1)
-        
         for i, block in enumerate(self.blocks):
             if self.gradient_checkpointing:
-                x_concat = checkpoint(block, x_concat, t_emb, f0, f1, f2, seq_len_text, grid_h, 
-                                      grid_w, attend_mask=full_mask, use_reentrant=False)
+                x_concat = checkpoint(block, x_concat, t_emb, freqs, seq_len_text, grid_h, 
+                                      grid_w, full_mask, use_reentrant=False)
             else:
-                x_concat = block(x_concat, t_emb, f0, f1, f2, seq_len_text, grid_h, grid_w, 
+                x_concat = block(x_concat, t_emb, freqs, seq_len_text, grid_h, grid_w, 
                                  attend_mask=full_mask)
-            
-        # 5. Output
-        img_token_len = grid_h * grid_w
-        x_out = x_concat[:, -img_token_len:, :]
-            
+
+        x_out = x_concat[:, -img_len:, :]
         x_out = self.final_norm(x_out)
         x_out = self.final_layer(x_out)
         x_out = self.unpatchify(x_out, grid_h, grid_w)
-        
         return x_out
 
     def timestep_embedding(self, t, dim):
@@ -391,24 +349,11 @@ class SingleStreamDiT(nn.Module):
         return x
                 
     def initialize_weights(self):
-        nn.init.normal_(self.x_embedder.weight, std=0.02)
-        nn.init.normal_(self.cap_embedder[1].weight, std=0.02)
-        nn.init.constant_(self.cap_embedder[1].bias, 0)
-        
-        nn.init.normal_(self.t_embedder[0].weight, std=0.02)
-        nn.init.normal_(self.t_embedder[2].weight, std=0.02)
-        
-        nn.init.normal_(self.cap_pad_token, std=0.02)
-        
-        nn.init.constant_(self.final_layer.weight, 0)
-        nn.init.constant_(self.final_layer.bias, 0)
-
         for m in self.modules():
             if isinstance(m, nn.Linear):
-                if m not in [self.x_embedder, self.final_layer]:
-                    nn.init.normal_(m.weight, std=0.02)
-                    if m.bias is not None:
-                        nn.init.constant_(m.bias, 0)
+                nn.init.normal_(m.weight, std=0.02)
+                if m.bias is not None:
+                    nn.init.constant_(m.bias, 0)
 
             elif isinstance(m, RMSNorm):
                 nn.init.ones_(m.weight)
@@ -423,3 +368,25 @@ class SingleStreamDiT(nn.Module):
                         m.dwconv.weight[:, 0, 1, 1] = 1.0 
                         if m.dwconv.bias is not None:
                             nn.init.constant_(m.dwconv.bias, 0)
+
+        nn.init.normal_(self.x_embedder.weight, std=0.02)
+        nn.init.normal_(self.cap_embedder[1].weight, std=0.02)
+        nn.init.constant_(self.cap_embedder[1].bias, 0)
+        
+        nn.init.normal_(self.t_embedder[0].weight, std=0.02)
+        nn.init.normal_(self.t_embedder[2].weight, std=0.02)
+        
+        nn.init.normal_(self.cap_pad_token, std=0.02)
+        
+        nn.init.constant_(self.final_layer.weight, 0)
+        nn.init.constant_(self.final_layer.bias, 0)
+                            
+        for block in self.noise_refiner + self.blocks:
+            nn.init.constant_(block.adaLN_msa[-1].weight, 0)
+            nn.init.constant_(block.adaLN_msa[-1].bias, 0)
+            nn.init.constant_(block.adaLN_mlp[-1].weight, 0)
+            nn.init.constant_(block.adaLN_mlp[-1].bias, 0)
+            
+        for block in self.context_refiner:
+            nn.init.constant_(block.attention_out.weight, 0)
+            nn.init.constant_(block.feed_forward.w3.weight, 0)

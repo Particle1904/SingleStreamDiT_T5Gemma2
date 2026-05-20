@@ -61,7 +61,7 @@ def sanity():
     print(f"Target Resolution: {w}x{h}")
     print(f"RK4 Enabled: {ENABLE_RK4}")
     
-    model = model = SingleStreamDiT(
+    model = SingleStreamDiT(
         in_channels=Config.in_channels,
         patch_size=Config.patch_size,
         hidden_size=Config.hidden_size,
@@ -94,8 +94,9 @@ def sanity():
                                         dtype=Config.dtype)
    
             uncond_embeds = torch.zeros_like(text_embeds)
-            combined_text_embeds = torch.cat([uncond_embeds, text_embeds], dim=0)  
-            combined_mask = torch.cat([text_mask, text_mask], dim=0)
+            uncond_mask = torch.ones_like(text_mask)
+            combined_text_embeds = torch.cat([uncond_embeds, text_embeds], dim=0)
+            combined_mask = torch.cat([uncond_mask, text_mask], dim=0)
                  
             x_euler = initial_noise.clone()
             x_rk4 = None
@@ -103,7 +104,7 @@ def sanity():
             with torch.autocast(device_type=DEVICE, dtype=Config.dtype):
                 x_euler = run_sampling_pipeline(model=model, initial_noise=x_euler, steps=SAMPLE_STEPS, 
                                                 combined_text_embeds=combined_text_embeds, cfg=1.0, 
-                                                sampler_type="euler", schedule_type="uniform", 
+                                                sampler_type="euler", scheduler_type="uniform", 
                                                 shift_val=Config.shift_val, text_mask=combined_mask)
                 if ENABLE_RK4:
                     x_rk4 = run_sampling_pipeline(model=model, initial_noise=initial_noise.clone(), steps=SAMPLE_STEPS,
@@ -158,25 +159,18 @@ def sanity():
             "text_embeds": text_embeds,
             "text_mask": text_mask
         }
-        x_t, t, x_1, target, text_for_model, mask_for_model = prepare_batch_and_targets(batch_data, DEVICE, Config.dtype, 
-                                                                        Config.shift_val)
+        x_t, t, x_1, target, text_for_model, mask_for_model = prepare_batch_and_targets(batch_data, DEVICE, 
+                                                                                        Config.dtype, 
+                                                                                        Config.shift_val)
         
         with torch.autocast(device_type=DEVICE, dtype=Config.dtype):
-            if USE_SELF_EVAL and step > (STEPS * Config.start_self_eval_at):
-                 with torch.no_grad():
-                    loss_batch = calculate_total_loss(model, ema_model, x_t, t, x_1, target, text_for_model, mask_for_model, 
-                                                step, STEPS, USE_SELF_EVAL, Config.start_self_eval_at, 
-                                                Config.self_eval_lambda, Config.fal_lambda, Config.fcl_lambda, 
-                                                Config.loss_type)
-            else:
-                loss_batch = calculate_total_loss(model, ema_model, x_t, t, x_1, target, text_for_model, mask_for_model, 
-                                            step, STEPS, USE_SELF_EVAL, Config.start_self_eval_at, 
-                                            Config.self_eval_lambda, Config.fal_lambda, Config.fcl_lambda, 
-                                            Config.loss_type)
+            loss_batch = calculate_total_loss(model, x_t, t, target, text_for_model, mask_for_model, 
+                                              Config.loss_type)
             loss = loss_batch.mean()
                 
         optimizer.zero_grad()
         loss.backward()
+        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
         optimizer.step()
         scheduler.step()
         ema_model.update_parameters(model)
@@ -189,13 +183,11 @@ def sanity():
             if (t_flat >= 0.66).any(): binned_logs["loss_t_image"] = loss_batch[t_flat >= 0.66].mean().item()
         
         lr_current = optimizer.param_groups[0]['lr']
-        self_eval_status = "On" if USE_SELF_EVAL and step > (STEPS * Config.start_self_eval_at) else "Off"     
-        
         log_dict = {"loss": loss.item(), "lr": lr_current}
         log_dict.update(binned_logs)
         wandb.log(log_dict, step=step)
         
-        pbar.set_description(f"Step {step}|Loss {loss.item():.3f}|Loss {Config.loss_type}|LR {lr_current:.6f}|Self-E {self_eval_status}|")
+        pbar.set_description(f"Step {step}|Loss {loss.item():.3f}|Loss {Config.loss_type}|LR {lr_current:.6f}|")
                             
         if step > 0 and (step % SAMPLE_EVERY == 0 or step == STEPS - 1):
             validate(step)
