@@ -2,7 +2,7 @@ import torch
 import os
 import sys
 from tqdm import tqdm
-# Import config from the folder above.
+
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 sys.path.append(ROOT)
 os.chdir(ROOT)

@@ -37,7 +37,7 @@ def rk4_step(model, x, t, dt, text_embeds, cfg, t_mid, t_end, text_mask=None):
     k4 = cfg_velocity(model, x + dt * k3, t_end, text_embeds, cfg, text_mask)
     return x + (dt / 6.0) * (k1 + 2*k2 + 2*k3 + k4)
 
-def dpm_solver_pp_step(model, x, t, t_next, text_embeds, cfg, text_mask):
+def heun_step(model, x, t, t_next, text_embeds, cfg, text_mask):
     v_curr = cfg_velocity(model, x, t, text_embeds, cfg, text_mask)
     h = t_next - t
     x_mid = x + h * v_curr
@@ -62,8 +62,8 @@ def run_sampling_pipeline(model, initial_noise, steps, combined_text_embeds, cfg
         elif sampler_type == "rk4":
             t_mid = (t + t_next) / 2.0
             x = rk4_step(model, x, t, dt, combined_text_embeds, cfg, t_mid, t_next, text_mask)
-        elif sampler_type == "dpmpp":
-            x = dpm_solver_pp_step(model, x, t, t_next, combined_text_embeds, cfg, text_mask)
+        elif sampler_type == "heun":
+            x = heun_step(model, x, t, t_next, combined_text_embeds, cfg, text_mask)
         else:
             raise ValueError(f"Unknown sampler: {sampler_type}")
     return x

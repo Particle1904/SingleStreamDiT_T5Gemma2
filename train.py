@@ -7,6 +7,7 @@ import bitsandbytes as bnb
 import wandb
 import builtins
 import time
+import copy
 import math
 from torch.utils.data import DataLoader
 from accelerate import Accelerator, DistributedDataParallelKwargs
@@ -156,7 +157,7 @@ def train():
     
     model.initialize_weights()
     print_model_parameters(model)
-    ema_model = AveragedModel(model.float(), multi_avg_fn=get_ema_multi_avg_fn(Config.ema_decay))
+    ema_model = AveragedModel(copy.deepcopy(model).float(), multi_avg_fn=get_ema_multi_avg_fn(Config.ema_decay))
     ema_model.eval()
     ema_model.requires_grad_(False)
     
@@ -304,8 +305,11 @@ def train():
                         binned_counts = {k: 0 for k in binned_counts}
 
         if display_epoch > 0 and display_epoch % Config.validate_every == 0:
-            validate(accelerator, model, vae, display_epoch, global_step, is_ema=False)
+            accelerator.wait_for_everyone()
+            unwrapped_model = accelerator.unwrap_model(model)
+            validate(accelerator, unwrapped_model, vae, display_epoch, global_step, is_ema=False)
             validate(accelerator, ema_model.module, vae, display_epoch, global_step, is_ema=True)
+            accelerator.wait_for_everyone()
             
         if accelerator.is_main_process and display_epoch > 0 and display_epoch % Config.save_every == 0:
             unwrapped = accelerator.unwrap_model(model)

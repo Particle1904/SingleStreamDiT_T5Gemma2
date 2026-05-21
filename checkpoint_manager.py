@@ -191,13 +191,22 @@ class CheckpointManager:
                 f"checkpoints/full_state_epoch_{delete_epoch}.pt",
                 f"checkpoints/ema_epoch_{delete_epoch}.pt"
             ]
-            
+            deleted_any = False
             for file_path in files_to_del:
                 try:
                     self.api.delete_file(file_path, repo_id=self.config.hf_repo_id)
-                    print(f"Deleted old HF checkpoint: {file_path}")
+                    print(f"Deleted old HF checkpoint file: {file_path}")
+                    deleted_any = True
                 except Exception:
                     pass
+            
+            if deleted_any:
+                try:
+                    print("\n[CheckpointManager] Squashing Hugging Face Git history to purge deleted LFS files...")
+                    self.api.super_squash_history(repo_id=self.config.hf_repo_id)
+                    print("[CheckpointManager] Hugging Face LFS storage reclaimed successfully!\n")
+                except Exception as e:
+                    print(f"[CheckpointManager] History squash failed: {e}")
                 
     def _resolve_path(self, requested_path):
         if requested_path == "latest":

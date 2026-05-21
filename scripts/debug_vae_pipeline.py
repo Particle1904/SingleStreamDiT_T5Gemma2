@@ -3,7 +3,6 @@ import os
 import sys
 from PIL import Image
 
-# Import config and latents from the folder above.
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 sys.path.append(ROOT)
 os.chdir(ROOT)

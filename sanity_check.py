@@ -4,11 +4,9 @@ import time
 import bitsandbytes as bnb
 from tqdm import tqdm
 from model import SingleStreamDiT
-from diffusers import AutoencoderKL
 from PIL import Image, ImageDraw, ImageFont
 from torch.optim.swa_utils import AveragedModel, get_ema_multi_avg_fn
 from transformers import get_cosine_schedule_with_warmup 
-from diffusers.models import AutoencoderKL as DiffusersAutoencoderKL
 from model_loader import load_vae
 from config import Config
 from latents import decode_latents_to_image
@@ -25,7 +23,14 @@ SAMPLE_EVERY = 200
 SAMPLE_STEPS = 50
 ENABLE_RK4 = False
 
-USE_SELF_EVAL = False 
+# =====================================================================
+# CONFIGURATION: MANUAL FILE OVERRIDES
+# Set these to specific filenames in your cache directory to test 
+# Set to None to let the script automatically grab the first two files.
+# =====================================================================
+MANUAL_FILE_A = "1349.pt"
+MANUAL_FILE_B = "34953.pt"
+# =====================================================================
 
 torch.backends.cuda.enable_flash_sdp(True)
 torch.backends.cuda.enable_mem_efficient_sdp(True)
@@ -35,32 +40,63 @@ torch.backends.cudnn.allow_tf32 = True
 torch.backends.cudnn.benchmark = True 
 
 def sanity():
-    wandb.init(project=Config.project_name + "_sanity", name=parse_run_name(LEARNING_RATE), 
+    wandb.init(project=Config.project_name + "_sanity", name=parse_run_name(LEARNING_RATE) + "_4-image", 
                config={"lr": LEARNING_RATE,                       
                        "shift": Config.shift_val,
                        "loss_type": Config.loss_type
                        })
     
-    if not os.path.exists(Config.target_file):
-        print(f"Error: {Config.target_file} not found.")
+    if MANUAL_FILE_A is not None and MANUAL_FILE_B is not None:
+        paired_files = [MANUAL_FILE_A, MANUAL_FILE_B]
+    else:
+        cache_files = sorted([f for f in os.listdir(Config.cache_dir) if f.endswith('.pt')])
+        if len(cache_files) < 2:
+            print(f"Error: Need at least 2 cached .pt files in {Config.cache_dir} to run a multi-concept check.")
+            return
+        paired_files = cache_files[:2]
+    
+    file_a = os.path.join(Config.cache_dir, paired_files[0])
+    file_b = os.path.join(Config.cache_dir, paired_files[1])
+    
+    if not os.path.exists(file_a):
+        print(f"Error: Specific file A not found at path: {file_a}")
+        return
+    if not os.path.exists(file_b):
+        print(f"Error: Specific file B not found at path: {file_b}")
         return
     
-    print(f"Loading {Config.target_file}...")
-    data = torch.load(Config.target_file)    
-    latents = data["latents"].unsqueeze(0).to(DEVICE, Config.dtype)
+    print(f"Selected paired files for sanity check:")
+    print(f"  File A: {paired_files[0]}")
+    print(f"  File B: {paired_files[1]}")
     
-    if "text_embeds_list" in data:
-        text_embeds = data["text_embeds_list"][0].unsqueeze(0).to(Config.device, Config.dtype)
-        text_mask = data["attention_mask_list"][0].unsqueeze(0).to(Config.device)
+    data_a = torch.load(file_a)
+    data_b = torch.load(file_b)
+    
+    h_a, w_a = data_a["height"], data_a["width"]
+    h_b, w_b = data_b["height"], data_b["width"]
+    
+    latents_a = data_a["latents"].unsqueeze(0).to(DEVICE, Config.dtype)
+    latents_b = data_b["latents"].unsqueeze(0).to(DEVICE, Config.dtype)
+    
+    def get_full_text_lists(data):
+        if "text_embeds_list" in data:
+            embeds_list = data["text_embeds_list"].to(Config.device, Config.dtype)
+            mask_list = data["attention_mask_list"].to(Config.device)
+        else:
+            embeds_list = data["text_embeds"].unsqueeze(0).to(Config.device, Config.dtype)
+            mask_list = data["attention_mask"].unsqueeze(0).to(Config.device)
+        return embeds_list, mask_list
+
+    embeds_list_a, mask_list_a = get_full_text_lists(data_a)
+    embeds_list_b, mask_list_b = get_full_text_lists(data_b)
+    
+    can_batch = (h_a == h_b) and (w_a == w_b)
+    if can_batch:
+        print(f"Resolutions match ({w_a}x{h_a}). Training in parallel (Batch Size = 2).")
+        latents_batch = torch.cat([latents_a, latents_b], dim=0)
     else:
-        text_embeds = data["text_embeds"].unsqueeze(0).to(Config.device, Config.dtype)
-        text_mask = data["attention_mask"].unsqueeze(0).to(Config.device)
-    
-    h, w = data["height"], data["width"]
-    
-    print(f"Target Resolution: {w}x{h}")
-    print(f"RK4 Enabled: {ENABLE_RK4}")
-    
+        print(f"Resolutions mismatch ({w_a}x{h_a} vs {w_b}x{h_b}). Training sequentially via alternating steps.")
+
     model = SingleStreamDiT(
         in_channels=Config.in_channels,
         patch_size=Config.patch_size,
@@ -85,80 +121,93 @@ def sanity():
     
     vae = load_vae()
 
+    def generate_sample(embeds, mask, h, w, torch_generator):
+        initial_noise = torch.randn(1, Config.in_channels, h // Config.vae_downsample_factor, 
+                                      w // Config.vae_downsample_factor, generator=torch_generator, device=DEVICE, 
+                                      dtype=Config.dtype)
+        uncond_embeds = torch.zeros_like(embeds)
+        uncond_mask = torch.ones_like(mask)
+        comb_embeds = torch.cat([uncond_embeds, embeds], dim=0)
+        comb_mask = torch.cat([uncond_mask, mask], dim=0)
+        
+        with torch.autocast(device_type=DEVICE, dtype=Config.dtype):
+            x_euler = run_sampling_pipeline(model=model, initial_noise=initial_noise, steps=SAMPLE_STEPS, 
+                                              combined_text_embeds=comb_embeds, cfg=1.0, 
+                                              sampler_type="euler", scheduler_type="uniform", 
+                                              shift_val=Config.shift_val, text_mask=comb_mask)
+        return decode_latents_to_image(vae_model=vae, latents=x_euler, device=DEVICE)
+
     def validate(step_count):
         model.eval()
         with torch.no_grad():
             torch_generator = torch.Generator(device=DEVICE).manual_seed(42)
-            initial_noise = torch.randn(1, Config.in_channels, h // Config.vae_downsample_factor, 
-                                        w // Config.vae_downsample_factor, generator=torch_generator, device=DEVICE, 
-                                        dtype=Config.dtype)
-   
-            uncond_embeds = torch.zeros_like(text_embeds)
-            uncond_mask = torch.ones_like(text_mask)
-            combined_text_embeds = torch.cat([uncond_embeds, text_embeds], dim=0)
-            combined_mask = torch.cat([uncond_mask, text_mask], dim=0)
-                 
-            x_euler = initial_noise.clone()
-            x_rk4 = None
-            
-            with torch.autocast(device_type=DEVICE, dtype=Config.dtype):
-                x_euler = run_sampling_pipeline(model=model, initial_noise=x_euler, steps=SAMPLE_STEPS, 
-                                                combined_text_embeds=combined_text_embeds, cfg=1.0, 
-                                                sampler_type="euler", scheduler_type="uniform", 
-                                                shift_val=Config.shift_val, text_mask=combined_mask)
-                if ENABLE_RK4:
-                    x_rk4 = run_sampling_pipeline(model=model, initial_noise=initial_noise.clone(), steps=SAMPLE_STEPS,
-                                                  combined_text_embeds=combined_text_embeds, cfg=1.0, 
-                                                  sampler_type="rk4", scheduler_type="karras",
-                                                  shift_val=Config.shift_val, text_mask=combined_mask)
-
-            img_pil_euler = decode_latents_to_image(vae_model=vae, latents=x_euler, device=DEVICE)
-            img_list = [img_pil_euler]
-            
-            if ENABLE_RK4:
-                img_pil_rk4 = decode_latents_to_image(vae_model=vae, latents=x_rk4, device=DEVICE)
-                img_list.append(img_pil_rk4)
-
-            w_euler, h_img = img_pil_euler.size
-            w_total = w_euler * len(img_list)
             label_height = 40
-            canvas = Image.new("RGB", (w_total, h_img + label_height), color=(0, 0, 0))
-            current_x = 0
-            for img_pil in img_list:
-                canvas.paste(img_pil, (current_x, label_height))
-                current_x += img_pil.size[0]
+            
+            images_to_render = []
+            labels_to_render = []
+            
+            num_caps_a = min(2, embeds_list_a.shape[0])
+            for i in range(num_caps_a):
+                img = generate_sample(embeds_list_a[i].unsqueeze(0), mask_list_a[i].unsqueeze(0), h_a, w_a, torch_generator)
+                images_to_render.append(img)
+                labels_to_render.append(f"{paired_files[0]} (Description {i+1})")
                 
-            draw = ImageDraw.Draw(canvas)
+            num_caps_b = min(2, embeds_list_b.shape[0])
+            for i in range(num_caps_b):
+                img = generate_sample(embeds_list_b[i].unsqueeze(0), mask_list_b[i].unsqueeze(0), h_b, w_b, torch_generator)
+                images_to_render.append(img)
+                labels_to_render.append(f"{paired_files[1]} (Description {i+1})")
 
+            total_w = sum(img.size[0] for img in images_to_render)
+            max_h = max(img.size[1] for img in images_to_render)
+            
+            canvas = Image.new("RGB", (total_w, max_h + label_height), color=(0, 0, 0))
+            
             try:
-                font = ImageFont.truetype("arial.ttf", 20)
+                font = ImageFont.truetype("arial.ttf", 16)
             except:
                 font = ImageFont.load_default()
 
-            label_y = label_height // 2
-            
-            if ENABLE_RK4:
-                half_w = w_total // 2
-                draw.text((half_w // 2, label_y), "Euler", fill=(255, 255, 255), font=font, anchor="mm")
-                draw.text((half_w + half_w // 2, label_y), "RK4", fill=(255, 255, 255), font=font, anchor="mm")
-            else:
-                draw.text((w_total // 2, label_y), "Euler", fill=(255, 255, 255), font=font, anchor="mm")
-
+            current_x = 0
+            draw = ImageDraw.Draw(canvas)
+            for img, label in zip(images_to_render, labels_to_render):
+                canvas.paste(img, (current_x, label_height))
+                draw.text((current_x + (img.size[0] // 2), label_height // 2), label, fill=(255, 255, 255), font=font, anchor="mm")
+                current_x += img.size[0]
+                
             filename = f"sanity_match_step_{step_count:04d}.png"
             canvas.save(filename)
             wandb.log({"sanity_sample": wandb.Image(canvas)}, step=step_count)
              
         model.train()
         
-    print(f"Starting Overfit (Shift={Config.shift_val}, SelfEval={USE_SELF_EVAL})...")
+    print(f"Starting Semantic Multicaption Overfit (Shift={Config.shift_val})...")
     pbar = tqdm(range(STEPS))
     
-    for step in pbar:        
-        batch_data = {
-            "latents": latents, 
-            "text_embeds": text_embeds,
-            "text_mask": text_mask
-        }
+    for step in pbar:
+        idx_a = torch.randint(0, embeds_list_a.shape[0], (1,)).item()
+        idx_b = torch.randint(0, embeds_list_b.shape[0], (1,)).item()
+        
+        embeds_a = embeds_list_a[idx_a].unsqueeze(0)
+        mask_a = mask_list_a[idx_a].unsqueeze(0)
+        
+        embeds_b = embeds_list_b[idx_b].unsqueeze(0)
+        mask_b = mask_list_b[idx_b].unsqueeze(0)
+
+        if can_batch:
+            text_embeds_batch = torch.cat([embeds_a, embeds_b], dim=0)
+            text_mask_batch = torch.cat([mask_a, mask_b], dim=0)
+            batch_data = {
+                "latents": latents_batch, 
+                "text_embeds": text_embeds_batch,
+                "text_mask": text_mask_batch
+            }
+        else:
+            if step % 2 == 0:
+                batch_data = {"latents": latents_a, "text_embeds": embeds_a, "text_mask": mask_a}
+            else:
+                batch_data = {"latents": latents_b, "text_embeds": embeds_b, "text_mask": mask_b}
+                
         x_t, t, x_1, target, text_for_model, mask_for_model = prepare_batch_and_targets(batch_data, DEVICE, 
                                                                                         Config.dtype, 
                                                                                         Config.shift_val)

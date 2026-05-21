@@ -6,21 +6,6 @@ from torch.utils.checkpoint import checkpoint
 from functools import lru_cache
 from config import Config
 
-def get_2d_sincos_pos_embed(embed_dim, grid_h, grid_w, device):
-    grid_y, grid_x = torch.meshgrid(torch.arange(grid_h, device=device), 
-                                    torch.arange(grid_w, device=device), indexing='ij')
-    
-    dim = embed_dim // 2
-    omega = 1.0 / (10000 ** (torch.arange(0, dim, 2, device=device).float() / dim))
-    
-    out_y = torch.outer(grid_y.flatten().float(), omega)
-    emb_y = torch.cat([out_y.sin(), out_y.cos()], dim=-1)
-    
-    out_x = torch.outer(grid_x.flatten().float(), omega)
-    emb_x = torch.cat([out_x.sin(), out_x.cos()], dim=-1)
-    
-    return torch.cat([emb_y, emb_x], dim=-1)
-
 class RoPE1D(nn.Module):
     def __init__(self, head_dim, theta=10000.0):
         super().__init__()
@@ -33,15 +18,39 @@ class RoPE1D(nn.Module):
         freqs = torch.outer(positions, inv_freq)
         return torch.cat([freqs.cos(), freqs.sin()], dim=-1)
 
-def apply_rope_1d(x, freqs):
+class RoPE2D(nn.Module):
+    def __init__(self, head_dim, theta=10000.0):
+        super().__init__()
+        self.head_dim = head_dim
+        self.theta = theta
+
+    def forward(self, grid_h, grid_w, device):
+        dim = self.head_dim // 2
+        inv_freq = 1.0 / (self.theta ** (torch.arange(0, dim, 2, device=device).float() / dim))
+
+        y = torch.arange(grid_h, device=device, dtype=torch.float32)
+        x = torch.arange(grid_w, device=device, dtype=torch.float32)
+
+        freqs_y = torch.outer(y, inv_freq)
+        freqs_x = torch.outer(x, inv_freq)
+
+        freqs_y = freqs_y.unsqueeze(1).expand(-1, grid_w, -1)
+        freqs_x = freqs_x.unsqueeze(0).expand(grid_h, -1, -1)
+
+        freqs = torch.cat([freqs_y, freqs_x], dim=-1)
+        freqs = freqs.reshape(-1, dim)
+
+        return torch.cat([freqs.cos(), freqs.sin()], dim=-1)
+
+def apply_rope(x, freqs):
     f = freqs.unsqueeze(0).unsqueeze(1)
     half = f.shape[-1] // 2
     cos = f[..., :half].to(x.dtype)
     sin = f[..., half:].to(x.dtype)
-    
+
     x1 = x[..., :half]
     x2 = x[..., half:]
-    
+
     x_rot_1 = x1 * cos - x2 * sin
     x_rot_2 = x1 * sin + x2 * cos
     return torch.cat([x_rot_1, x_rot_2], dim=-1)
@@ -139,8 +148,8 @@ class VisualFusionBlock(nn.Module):
         k = self.attention_norm_k(k)
         
         if freqs is not None:
-            q = apply_rope_1d(q, freqs)
-            k = apply_rope_1d(k, freqs)
+            q = apply_rope(q, freqs)
+            k = apply_rope(k, freqs)
             
         attn_mask = attend_mask.unsqueeze(1).unsqueeze(2)
         attn = F.scaled_dot_product_attention(q, k, v, attn_mask=attn_mask)
@@ -194,8 +203,8 @@ class ContextRefinerBlock(nn.Module):
         k = self.attention_norm_k(k)
         
         if freqs is not None:
-            q = apply_rope_1d(q, freqs)
-            k = apply_rope_1d(k, freqs)
+            q = apply_rope(q, freqs)
+            k = apply_rope(k, freqs)
                     
         attn_mask = attend_mask.unsqueeze(1).unsqueeze(2)
         attn = F.scaled_dot_product_attention(q, k, v, attn_mask=attn_mask)
@@ -242,7 +251,8 @@ class SingleStreamDiT(nn.Module):
             nn.Linear(hidden_size, hidden_size)
         )
         
-        self.rope = RoPE1D(self.head_dim, rope_base)
+        self.rope_txt = RoPE1D(self.head_dim, rope_base)
+        self.rope_img = RoPE2D(self.head_dim, rope_base)
         
         self.noise_refiner = nn.ModuleList([
             VisualFusionBlock(hidden_size, num_heads, dropout=dropout, use_conv=True) 
@@ -272,9 +282,6 @@ class SingleStreamDiT(nn.Module):
         x = self.patchify(x)
         x = self.x_embedder(x)
         
-        pos_embed = get_2d_sincos_pos_embed(self.hidden_size, grid_h, grid_w, x.device)
-        x = x + pos_embed.unsqueeze(0).to(x.dtype)
-
         is_null = (text_embeds.abs().sum(dim=(1, 2)) == 0)
         context = self.cap_embedder(text_embeds)
         
@@ -295,10 +302,9 @@ class SingleStreamDiT(nn.Module):
         t_freq = self.timestep_embedding(t, 256)
         t_emb = self.t_embedder(t_freq.to(x.dtype))
 
-        total_len = seq_len_text + img_len
-        freqs = self.rope(total_len, x.device)
-        freqs_txt = freqs[:seq_len_text]
-        freqs_img = freqs[seq_len_text:]
+        freqs_txt = self.rope_txt(seq_len_text, x.device)
+        freqs_img = self.rope_img(grid_h, grid_w, x.device)
+        freqs = torch.cat([freqs_txt, freqs_img], dim=0)
 
         for block in self.noise_refiner:
             if self.gradient_checkpointing:
@@ -314,7 +320,7 @@ class SingleStreamDiT(nn.Module):
                 context = block(context, freqs_txt, attend_mask=text_mask)
 
         x_concat = torch.cat([context, x], dim=1)
-        for i, block in enumerate(self.blocks):
+        for block in self.blocks:
             if self.gradient_checkpointing:
                 x_concat = checkpoint(block, x_concat, t_emb, freqs, seq_len_text, grid_h, 
                                       grid_w, full_mask, use_reentrant=False)

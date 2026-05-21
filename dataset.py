@@ -59,26 +59,38 @@ class TextImageDataset(Dataset):
         latents = data["latents"]
         if "text_embeds_list" in data:
             num_captions = data["text_embeds_list"].shape[0]
-            choice_idx = random.randint(0, num_captions - 1) 
-            
+            choice_idx = random.randint(0, num_captions - 1)
             text = data["text_embeds_list"][choice_idx]
             mask = data["attention_mask_list"][choice_idx]
         else:
             text = data["text_embeds"]
             mask = data.get("attention_mask", torch.ones(text.shape[0], dtype=torch.bool))
-        
+
+        curr_len = text.shape[0]
+        target_len = Config.max_token_length
+        if curr_len < target_len:
+            pad_len = target_len - curr_len
+            
+            pad_text = torch.zeros(pad_len, text.shape[1], dtype=text.dtype, device=text.device)
+            text = torch.cat([text, pad_text], dim=0)
+            
+            pad_mask = torch.zeros(pad_len, dtype=torch.bool, device=mask.device)
+            mask = torch.cat([mask, pad_mask], dim=0)
+        elif curr_len > target_len:
+            text = text[:target_len]
+            mask = mask[:target_len]
+        # ==========================================================
+
         latents = normalize_latents(latents)
-        
         if Config.flip_aug and random.random() < 0.5:
             latents = torch.flip(latents, dims=[-1])
-            
         if random.random() < Config.text_dropout:
             text = torch.zeros_like(text)
             mask = torch.ones_like(mask)
             
         return {
-            "latents": latents,
-            "text_embeds": text,
+            "latents": latents.to(Config.dtype),
+            "text_embeds": text.to(Config.dtype),
             "text_mask": mask,
             "height": data["height"],
             "width": data["width"]
