@@ -125,8 +125,6 @@ class VisualFusionBlock(nn.Module):
 
     def forward(self, x, c, freqs, seq_len_text, grid_h, grid_w, attend_mask=None):
         B, N, C = x.shape
-        if attend_mask is None:
-            attend_mask = torch.ones(B, N, dtype=torch.bool, device=x.device)
             
         shift_msa, scale_msa, gate_msa = self.adaLN_msa(c).chunk(3, dim=1)
         shift_mlp, scale_mlp, gate_mlp = self.adaLN_mlp(c).chunk(3, dim=1)
@@ -151,7 +149,7 @@ class VisualFusionBlock(nn.Module):
             q = apply_rope(q, freqs)
             k = apply_rope(k, freqs)
             
-        attn_mask = attend_mask.unsqueeze(1).unsqueeze(2)
+        attn_mask = attend_mask.unsqueeze(1).unsqueeze(2) if attend_mask is not None else None
         attn = F.scaled_dot_product_attention(q, k, v, attn_mask=attn_mask)
         attn = attn.transpose(1, 2).reshape(B, N, C)
         x = x + gate_msa.unsqueeze(1) * self.dropout(self.attention_out(attn))
@@ -190,9 +188,6 @@ class ContextRefinerBlock(nn.Module):
     def forward(self, x, freqs, attend_mask=None):
         B, N, C = x.shape
         
-        if attend_mask is None:
-            attend_mask = torch.ones(B, N, dtype=torch.bool, device=x.device)
-        
         x_norm = self.attention_norm1(x)
         
         q = self.attention_q(x_norm).reshape(B, N, self.num_heads, self.head_dim).permute(0, 2, 1, 3)
@@ -206,7 +201,7 @@ class ContextRefinerBlock(nn.Module):
             q = apply_rope(q, freqs)
             k = apply_rope(k, freqs)
                     
-        attn_mask = attend_mask.unsqueeze(1).unsqueeze(2)
+        attn_mask = attend_mask.unsqueeze(1).unsqueeze(2) if attend_mask is not None else None
         attn = F.scaled_dot_product_attention(q, k, v, attn_mask=attn_mask)
         attn = attn.transpose(1, 2).reshape(B, N, C)
         
@@ -297,7 +292,6 @@ class SingleStreamDiT(nn.Module):
             text_mask = text_mask.bool()
             
         img_len = grid_h * grid_w
-        full_mask = torch.cat([text_mask, torch.ones(B, img_len, dtype=torch.bool, device=x.device)], dim=1)
         
         t_freq = self.timestep_embedding(t, 256)
         t_emb = self.t_embedder(t_freq.to(x.dtype))
@@ -322,11 +316,11 @@ class SingleStreamDiT(nn.Module):
         x_concat = torch.cat([context, x], dim=1)
         for block in self.blocks:
             if self.gradient_checkpointing:
-                x_concat = checkpoint(block, x_concat, t_emb, freqs, seq_len_text, grid_h, 
-                                      grid_w, full_mask, use_reentrant=False)
+                x_concat = checkpoint(block, x_concat, t_emb, freqs, seq_len_text, grid_h, grid_w,
+                                      attend_mask=None, use_reentrant=False)
             else:
                 x_concat = block(x_concat, t_emb, freqs, seq_len_text, grid_h, grid_w, 
-                                 attend_mask=full_mask)
+                                 attend_mask=None)
 
         x_out = x_concat[:, -img_len:, :]
         x_out = self.final_norm(x_out)
