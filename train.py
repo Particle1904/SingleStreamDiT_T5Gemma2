@@ -30,7 +30,7 @@ warnings.filterwarnings("ignore", message="The `local_dir_use_symlinks` argument
 
 torch.backends.cuda.enable_flash_sdp(True)
 torch.backends.cuda.enable_mem_efficient_sdp(True)
-torch.backends.cuda.enable_math_sdp(False) 
+torch.backends.cuda.enable_math_sdp(True) 
 torch.backends.cuda.matmul.allow_tf32 = True
 torch.backends.cudnn.allow_tf32 = True
 torch.backends.cudnn.benchmark = True 
