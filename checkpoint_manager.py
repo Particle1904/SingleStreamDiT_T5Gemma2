@@ -183,30 +183,37 @@ class CheckpointManager:
             print(f"Upload failed: {e}")
 
     def _cleanup_hf(self, current_epoch):
-        keep_last = self.config.keep_last
-        delete_epoch = current_epoch - (self.config.save_every * keep_last)
-        
-        if delete_epoch > 0:
-            files_to_del = [
-                f"checkpoints/full_state_epoch_{delete_epoch}.pt",
-                f"checkpoints/ema_epoch_{delete_epoch}.pt"
-            ]
-            deleted_any = False
-            for file_path in files_to_del:
-                try:
-                    self.api.delete_file(file_path, repo_id=self.config.hf_repo_id)
-                    print(f"Deleted old HF checkpoint file: {file_path}")
-                    deleted_any = True
-                except Exception:
-                    pass
+        try:
+            repo_files = self.api.list_repo_files(repo_id=self.config.hf_repo_id)
+            active_chkpts = [f for f in repo_files if f.startswith("checkpoints/full_state_epoch_")]
             
-            if deleted_any:
-                try:
-                    print("\n[CheckpointManager] Squashing Hugging Face Git history to purge deleted LFS files...")
-                    self.api.super_squash_history(repo_id=self.config.hf_repo_id)
-                    print("[CheckpointManager] Hugging Face LFS storage reclaimed successfully!\n")
-                except Exception as e:
-                    print(f"[CheckpointManager] History squash failed: {e}")
+            def get_epoch(f):
+                match = re.search(r"epoch_(\d+)", f)
+                return int(match.group(1)) if match else -1
+                
+            active_epochs = set(get_epoch(f) for f in active_chkpts)
+            
+            lfs_files = list(self.api.list_lfs_files(repo_id=self.config.hf_repo_id))
+            
+            lfs_to_nuke = []
+            for lfs in lfs_files:
+                if lfs.filename.startswith("checkpoints/"):
+                    ep = get_epoch(lfs.filename)
+                    if ep != -1 and ep not in active_epochs:
+                        lfs_to_nuke.append(lfs)
+            
+            if lfs_to_nuke:
+                print(f"[CheckpointManager] Permanently deleting {len(lfs_to_nuke)} orphaned LFS files from HF backend...")
+                self.api.permanently_delete_lfs_files(
+                    repo_id=self.config.hf_repo_id,
+                    lfs_files=lfs_to_nuke
+                )
+                print("[CheckpointManager] LFS storage reclaimed successfully!")
+            else:
+                print("[CheckpointManager] No orphaned LFS files found to delete.")
+                
+        except Exception as e:
+            print(f"[CheckpointManager] HF LFS cleanup failed: {e}")
                 
     def _resolve_path(self, requested_path):
         if requested_path == "latest":
