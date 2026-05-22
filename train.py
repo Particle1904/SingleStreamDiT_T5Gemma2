@@ -30,7 +30,7 @@ warnings.filterwarnings("ignore", message="The `local_dir_use_symlinks` argument
 
 torch.backends.cuda.enable_flash_sdp(True)
 torch.backends.cuda.enable_mem_efficient_sdp(True)
-torch.backends.cuda.enable_math_sdp(True) 
+torch.backends.cuda.enable_math_sdp(False) 
 torch.backends.cuda.matmul.allow_tf32 = True
 torch.backends.cudnn.allow_tf32 = True
 torch.backends.cudnn.benchmark = True 
@@ -138,6 +138,8 @@ def train():
     if accelerator.is_main_process:
         wandb_run_id = accelerator.get_tracker("wandb").run.id
 
+    model_dtype = torch.float32 if Config.dtype == torch.float16 else Config.dtype
+
     print(f"Loading DiT & VAE...")
     model = SingleStreamDiT(
         in_channels=Config.in_channels,
@@ -151,7 +153,7 @@ def train():
         max_token_length=Config.max_token_length,
         dropout=Config.model_dropout,
         rope_base=Config.rope_base
-    ).to(Config.device, Config.dtype)
+    ).to(Config.device, model_dtype)
     
     vae = load_vae()
     
