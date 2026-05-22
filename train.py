@@ -104,7 +104,7 @@ def train():
     mixed_precision_string = "fp16" if Config.dtype == torch.float16 else "bf16" if Config.dtype == torch.bfloat16 else "no"
     accelerator = Accelerator(log_with="wandb", mixed_precision=mixed_precision_string, 
                               gradient_accumulation_steps=Config.accum_steps,
-                              kwargs_handlers=[DistributedDataParallelKwargs(find_unused_parameters=False)])
+                              kwargs_handlers=[DistributedDataParallelKwargs(find_unused_parameters=True)])
     set_seed(Config.seed)
     Config.device = accelerator.device
     Config.accelerator = accelerator
@@ -249,7 +249,7 @@ def train():
         binned_counts = {"loss_t_noise": 0, "loss_t_mid": 0, "loss_t_image": 0}
         for step, batch in enumerate(pbar):
             with accelerator.accumulate(model):
-                x_t, t, x_1, target, text, text_mask = prepare_batch_and_targets(batch, Config.device, Config.dtype,
+                x_t, t, x_1, target, text, text_mask = prepare_batch_and_targets(batch, Config.device, torch.float32,
                                                                                  Config.shift_val)
                 
                 with accelerator.autocast():
