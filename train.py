@@ -159,7 +159,7 @@ def train():
     
     model.initialize_weights()
     print_model_parameters(model)
-    ema_model = AveragedModel(copy.deepcopy(model).float(), multi_avg_fn=get_ema_multi_avg_fn(Config.ema_decay))
+    ema_model = AveragedModel(model, multi_avg_fn=get_ema_multi_avg_fn(Config.ema_decay))
     ema_model.eval()
     ema_model.requires_grad_(False)
     
