@@ -332,6 +332,7 @@ class SingleStreamDiT(nn.Module):
         x_out = self.final_norm(x_out)
         x_out = self.final_layer(x_out)
         x_out = self.unpatchify(x_out, grid_h, grid_w)
+        x_out = x_out + (self.cap_pad_token.sum() * 0.0).to(x_out.dtype)
         return x_out
 
     def timestep_embedding(self, t, dim):
