@@ -104,7 +104,7 @@ def train():
     mixed_precision_string = "fp16" if Config.dtype == torch.float16 else "bf16" if Config.dtype == torch.bfloat16 else "no"
     accelerator = Accelerator(log_with="wandb", mixed_precision=mixed_precision_string, 
                               gradient_accumulation_steps=Config.accum_steps,
-                              kwargs_handlers=[DistributedDataParallelKwargs(find_unused_parameters=True)])
+                              kwargs_handlers=[DistributedDataParallelKwargs(find_unused_parameters=False)])
     set_seed(Config.seed)
     Config.device = accelerator.device
     Config.accelerator = accelerator
