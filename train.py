@@ -249,7 +249,7 @@ def train():
         binned_counts = {"loss_t_noise": 0, "loss_t_mid": 0, "loss_t_image": 0}
         for step, batch in enumerate(pbar):
             with accelerator.accumulate(model):
-                x_t, t, x_1, target, text, text_mask = prepare_batch_and_targets(batch, Config.device, torch.float32,
+                x_t, t, x_1, target, text, text_mask = prepare_batch_and_targets(batch, Config.device, Config.dtype,
                                                                                  Config.shift_val)
                 
                 with accelerator.autocast():
