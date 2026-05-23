@@ -185,13 +185,38 @@ class CheckpointManager:
     def _cleanup_hf(self, current_epoch):
         try:
             repo_files = self.api.list_repo_files(repo_id=self.config.hf_repo_id)
-            active_chkpts = [f for f in repo_files if f.startswith("checkpoints/full_state_epoch_")]
+            chkpt_files = [f for f in repo_files if f.startswith("checkpoints/full_state_epoch_")]
             
+            if len(chkpt_files) <= self.config.keep_last:
+                return
+                
             def get_epoch(f):
                 match = re.search(r"epoch_(\d+)", f)
                 return int(match.group(1)) if match else -1
                 
-            active_epochs = set(get_epoch(f) for f in active_chkpts)
+            epochs = sorted(list(set(get_epoch(f) for f in chkpt_files)))
+            epochs_to_keep = epochs[-self.config.keep_last:]
+            epochs_to_delete = epochs[:-self.config.keep_last]
+            
+            if not epochs_to_delete:
+                return
+                
+            files_to_del = []
+            for ep in epochs_to_delete:
+                files_to_del.append(f"checkpoints/full_state_epoch_{ep}.pt")
+                files_to_del.append(f"checkpoints/ema_epoch_{ep}.pt")
+                
+            files_to_del = [f for f in files_to_del if f in repo_files]
+            
+            if files_to_del:
+                from huggingface_hub import CommitOperationDelete
+                operations = [CommitOperationDelete(path_in_repo=f) for f in files_to_del]
+                self.api.create_commit(
+                    repo_id=self.config.hf_repo_id,
+                    operations=operations,
+                    commit_message=f"Purging active checkpoints up to epoch {epochs_to_delete[-1]}"
+                )
+                print(f"[CheckpointManager] Successfully deleted {len(files_to_del)} files from HEAD branch.")
             
             lfs_files = list(self.api.list_lfs_files(repo_id=self.config.hf_repo_id))
             
@@ -199,7 +224,7 @@ class CheckpointManager:
             for lfs in lfs_files:
                 if lfs.filename.startswith("checkpoints/"):
                     ep = get_epoch(lfs.filename)
-                    if ep != -1 and ep not in active_epochs:
+                    if ep != -1 and ep not in epochs_to_keep:
                         lfs_to_nuke.append(lfs)
             
             if lfs_to_nuke:
