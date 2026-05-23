@@ -162,7 +162,7 @@ class CheckpointManager:
         elif scheduler is None:
             print(">> Scheduler reset: Starting fresh.")
             
-        start_epoch = checkpoint.get('epoch', 0) + 1
+        start_epoch = checkpoint.get('epoch', 0)
         global_step = checkpoint.get('global_step', 0)
         
         del checkpoint
