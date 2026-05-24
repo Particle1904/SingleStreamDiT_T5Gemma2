@@ -54,9 +54,7 @@ class FSDPAwareEMA:
         ema_state = self.ema_model.state_dict()
         for name, param in unwrapped_model.named_parameters():
             if param.requires_grad:
-                ema_param = ema_state[name]
-                updated = ema_param.float() * self.decay + param.data.float() * (1 - self.decay)
-                ema_param.copy_(updated.to(ema_param.dtype))
+                ema_state[name].mul_(self.decay).add_(param.data.to(ema_state[name].dtype), alpha=1.0 - self.decay)
                 
 def can_attempt_resume(resume_value):
     return resume_value is not None

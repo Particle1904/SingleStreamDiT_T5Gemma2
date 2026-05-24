@@ -56,18 +56,18 @@ class SwiGLUWithImageConv(nn.Module):
             img_len = grid_h * grid_w
             if seq_len_text == 0:
                 B, L, C = gated.shape
-                img_spatial = gated.transpose(1, 2).reshape(B, C, grid_h, grid_w)
+                img_spatial = gated.view(B, grid_h, grid_w, C).permute(0, 3, 1, 2)
                 img_spatial = self.dwconv(img_spatial)
-                gated = img_spatial.reshape(B, C, -1).transpose(1, 2)
+                gated = img_spatial.permute(0, 2, 3, 1).reshape(B, L, C)
             else:
                 text_part = gated[:, :-img_len]
                 img_part = gated[:, -img_len:]
                 B, L, C = img_part.shape
                 
-                img_spatial = img_part.transpose(1, 2).reshape(B, C, grid_h, grid_w)
+                img_spatial = img_part.view(B, grid_h, grid_w, C).permute(0, 3, 1, 2)
                 img_spatial = self.dwconv(img_spatial)
-                img_mixed = img_spatial.reshape(B, C, -1).transpose(1, 2)
                 
+                img_mixed = img_spatial.permute(0, 2, 3, 1).reshape(B, L, C)
                 gated = torch.cat([text_part, img_mixed], dim=1)
                 
         return self.w3(gated)
