@@ -30,10 +30,10 @@ warnings.filterwarnings("ignore", message="The `local_dir_use_symlinks` argument
 
 torch.backends.cuda.enable_flash_sdp(True)
 torch.backends.cuda.enable_mem_efficient_sdp(True)
-torch.backends.cuda.enable_math_sdp(False) 
+torch.backends.cuda.enable_math_sdp(True) 
 torch.backends.cuda.matmul.allow_tf32 = True
 torch.backends.cudnn.allow_tf32 = True
-torch.backends.cudnn.benchmark = True 
+torch.backends.cudnn.benchmark = False 
 
 LOG_EVERY_STEPS = 1 
 
@@ -162,7 +162,7 @@ def train():
         num_heads=Config.num_heads,
         text_embed_dim=Config.text_embed_dim,
         refiner_depth=Config.refiner_depth,
-    ).to(Config.device, Config.dtype)
+    ).to(Config.device, torch.float32
     
     vae = load_vae()
     
