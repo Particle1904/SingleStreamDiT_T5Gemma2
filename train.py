@@ -86,7 +86,7 @@ def validate(accelerator, model, vae, epoch, global_step, is_ema=False):
         text_embeds = data["text_embeds"].unsqueeze(0).to(Config.device, Config.dtype)
         text_mask = data["attention_mask"].unsqueeze(0).to(Config.device)
     uncond_embeds = torch.zeros_like(text_embeds)
-    uncond_mask = text_mask.clone()
+    uncond_mask = torch.ones_like(text_mask)
     combined_text_embeds = torch.cat([uncond_embeds, text_embeds], dim=0)
     combined_mask = torch.cat([uncond_mask, text_mask], dim=0)
 

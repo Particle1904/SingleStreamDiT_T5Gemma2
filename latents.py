@@ -52,7 +52,7 @@ def get_combined_text_embeds(prompt: str, neg_prompt: str, cfg: float, text_enco
         uncond_embeds, uncond_mask = encode_single(neg_prompt)
     else:
         uncond_embeds = torch.zeros_like(cond_embeds)
-        uncond_mask = cond_mask.clone()
+        uncond_mask = torch.ones_like(cond_mask)
     
     combined_text = torch.cat([uncond_embeds.unsqueeze(0), cond_embeds.unsqueeze(0)], dim=0)
     combined_mask = torch.cat([uncond_mask.unsqueeze(0), cond_mask.unsqueeze(0)], dim=0)

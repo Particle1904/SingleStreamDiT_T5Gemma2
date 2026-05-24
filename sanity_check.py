@@ -133,7 +133,7 @@ def sanity():
                                       w // Config.vae_downsample_factor, generator=torch_generator, device=DEVICE,
                                       dtype=Config.dtype)
         uncond_embeds = torch.zeros_like(embeds)
-        uncond_mask = mask.clone()
+        uncond_mask = torch.ones_like(mask)
         combined_text_embeds = torch.cat([uncond_embeds, embeds], dim=0)
         combined_mask = torch.cat([uncond_mask, mask], dim=0)
         
