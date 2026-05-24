@@ -8,6 +8,8 @@ import torchvision.transforms.functional as TF
 from diffusers import AutoencoderKL
 from diffusers.models import AutoencoderKL as DiffusersAutoencoderKL
 from tqdm import tqdm
+from transformers import AutoModel
+
 from config import Config
 from model_loader import load_vae
 from text_encoder import TextEncoderWrapper
@@ -61,7 +63,10 @@ def setup_models():
     print(f"Loading Text Encoder: {Config.text_model_id}...")
     text_encoder = TextEncoderWrapper(dtype=Config.dtype, device=Config.device)
     
-    return vae, text_encoder
+    print(f"Loading DINOv3: {Config.repa_model}...")
+    dinov3 = AutoModel.from_pretrained(Config.repa_model).to(Config.device, dtype=Config.dtype).eval()
+    
+    return vae, text_encoder, dinov3
 
 def process():
     os.makedirs(Config.cache_dir, exist_ok=True)
@@ -81,8 +86,13 @@ def process():
         cache_path = os.path.join(Config.cache_dir, f"{base_name}.pt")
         
         if os.path.exists(cache_path):
-            skipped_count += 1
-            continue
+            try:
+                data = torch.load(cache_path, map_location="cpu")
+                if "repa_target" in data:
+                    skipped_count += 1
+                    continue
+            except:
+                pass
             
         if base_name not in caption_index or len(caption_index[base_name]) == 0:
             continue
@@ -93,17 +103,20 @@ def process():
     print("         CACHE RESUME STATUS")
     print("="*40)
     print(f"Total images found in dataset : {len(all_files)}")
-    print(f"Already processed (Skipped)   : {skipped_count}")
-    print(f"Remaining to process          : {len(files_to_process)}")
+    print(f"Already fully processed (Skipped) : {skipped_count}")
+    print(f"Remaining to process             : {len(files_to_process)}")
     print("="*40 + "\n")
     
     if len(files_to_process) == 0:
         print("All files are already processed! No work to do. Exiting safely.")
         return
 
-    vae, text_encoder = setup_models()
+    vae, text_encoder, dinov3 = setup_models()
     
-    print("Starting preprocessing for remaining files with Batching & Dense Bucketing...")
+    imagenet_mean = torch.tensor([0.485, 0.456, 0.406], device=Config.device, dtype=Config.dtype).view(1, 3, 1, 1)
+    imagenet_std = torch.tensor([0.229, 0.224, 0.225], device=Config.device, dtype=Config.dtype).view(1, 3, 1, 1)
+    
+    print("Starting preprocessing for remaining files with Batching, Dense Bucketing & Quantized DINOv3 alignment...")
     bucket_groups = {}
     bucket_counts = {}
 
@@ -173,13 +186,24 @@ def process():
             if not img_tensors: 
                 continue
 
-            batch_tensor = torch.stack(img_tensors).to(Config.device)
-            batch_tensor = TF.normalize(batch_tensor, [0.5], [0.5])
+            batch_tensor_01 = torch.stack(img_tensors).to(Config.device, dtype=Config.dtype)
+            batch_tensor_vae = TF.normalize(batch_tensor_01, [0.5], [0.5])
+            dinov3_input = (batch_tensor_01 - imagenet_mean) / imagenet_std
             
-            with torch.no_grad(), torch.autocast(device_type=Config.device.type if isinstance(Config.device, torch.device) else torch.device(Config.device).type, dtype=Config.dtype):
-                encoded = vae.encode(batch_tensor)
+            device_type = Config.device.type if isinstance(Config.device, torch.device) else torch.device(Config.device).type
+
+            # 1. Process through VAE
+            with torch.no_grad(), torch.autocast(device_type=device_type, dtype=Config.dtype):
+                encoded = vae.encode(batch_tensor_vae)
                 latents_batch = encoded.latent_dist.mode() if hasattr(encoded, "latent_dist") else encoded[0]
 
+            # 2. Process through DINOv3
+            with torch.no_grad(), torch.autocast(device_type=device_type, dtype=Config.dtype):
+                dino_out = dinov3(dinov3_input)
+                num_patches = (bh // 16) * (bw // 16)
+                repa_targets = dino_out.last_hidden_state[:, -num_patches:, :]
+
+            # 3. Save, with INT8 quantization applied to the targets on the fly
             for idx, data in enumerate(valid_batch_data):
                 active_indices = data["mask"].nonzero()
                 if active_indices.numel() > 0:
@@ -187,8 +211,18 @@ def process():
                 else:
                     max_len = 1
                 
+                # Dynamic symmetric quantization
+                tensor_to_save = repa_targets[idx].cpu()
+                scale = tensor_to_save.abs().max()
+                if scale == 0:
+                    scale = torch.tensor(1.0)
+                scale_factor = scale / 127.0
+                quantized_tensor = (tensor_to_save / scale_factor).round().clamp(-128, 127).to(torch.int8)
+                
                 save_data = {
                     "latents": latents_batch[idx].cpu().to(dtype=Config.dtype),
+                    "repa_target": quantized_tensor,
+                    "repa_scale": scale_factor.to(torch.float32),
                     "text_embeds_list": data["embeds"][:, :max_len].clone(),
                     "attention_mask_list": data["mask"][:, :max_len].clone(),
                     "width": bw,

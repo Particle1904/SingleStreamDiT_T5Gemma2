@@ -261,6 +261,8 @@ class SingleStreamDiT(nn.Module):
         theta: float = Config.rope_base,
         cond_dropout_prob: float = Config.text_dropout,
         max_token_length: int = Config.max_token_length,
+        repa_layer: int = Config.repa_layer,
+        repa_dim: int = Config.repa_dim
     ):
         super().__init__()
 
@@ -275,6 +277,8 @@ class SingleStreamDiT(nn.Module):
         self.rope_theta = theta
         self.cond_dropout_prob = cond_dropout_prob
         self.max_token_length = max_token_length
+        self.repa_layer = repa_layer
+        self.repa_dim = repa_dim
 
         patch_sizes = [patch_size]
         self.x_embedders = nn.ModuleDict({
@@ -310,6 +314,15 @@ class SingleStreamDiT(nn.Module):
 
         self.final_adaLN = nn.Sequential(nn.SiLU(), nn.Linear(self.hidden_size, 2 * self.hidden_size, bias=True))
         self.final_norm = RMSNorm(self.hidden_size)
+        
+        self.repa_proj = nn.Sequential(
+            nn.Linear(self.hidden_size, self.hidden_size),
+            nn.SiLU(),
+            nn.Linear(self.hidden_size, self.hidden_size),
+            nn.SiLU(),
+            nn.Linear(self.hidden_size, self.repa_dim)
+        )
+        
         self.initialize_weights()
 
     def get_rope_freqs(self, seq_len_text: int, grid_h: int, grid_w: int, device: torch.device, p: int, B: int, text_mask: Optional[torch.Tensor]) -> Tuple[torch.Tensor, torch.Tensor]:
@@ -373,6 +386,7 @@ class SingleStreamDiT(nn.Module):
         text_mask: Optional[torch.Tensor] = None, 
         patch_size: Optional[int] = None,
         gradient_checkpointing: bool = Config.gradient_checkpointing,
+        return_repa: bool = False
     ) -> torch.Tensor:
         if patch_size is None:
             patch_size = self.patch_size
@@ -437,13 +451,18 @@ class SingleStreamDiT(nn.Module):
             img_mask = torch.ones((B, img_len), dtype=torch.bool, device=x.device)
             unified_mask = torch.cat([text_mask, img_mask], dim=1)
 
-        for block in self.blocks:
+        repa_features = None
+
+        for i, block in enumerate(self.blocks):
             if gradient_checkpointing:
                 unified = checkpoint(block, unified, t_emb, unified_mask, seq_len_text, grid_h, grid_w,
                                      rope_freqs_all, True, use_reentrant=False)
             else:
                 unified = block(unified, t_emb, unified_mask, seq_len_text, grid_h, grid_w, rope_freqs_all, True)
-
+            
+            if return_repa and i == self.repa_layer:
+                repa_features = unified[:, -img_len:, :]
+                
         # Isolate Output Image Tokens
         x_out = unified[:, -img_len:, :]
         x_out = self.final_norm(x_out)
@@ -456,4 +475,9 @@ class SingleStreamDiT(nn.Module):
 
         # Unpatchify back to spatial layout
         x_out = x_out.view(B, grid_h, grid_w, C, p, p).permute(0, 3, 1, 4, 2, 5).reshape(B, C, H, W)
+        
+        if return_repa:
+            repa_pred = self.repa_proj(repa_features)
+            return x_out, repa_pred
+        
         return x_out

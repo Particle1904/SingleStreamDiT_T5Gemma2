@@ -8,7 +8,7 @@ from PIL import Image, ImageDraw, ImageFont
 from transformers import get_cosine_schedule_with_warmup 
 from model_loader import load_vae
 from config import Config
-from latents import decode_latents_to_image
+from latents import decode_latents_to_image, load_repa_target
 from samplers import run_sampling_pipeline
 from losses import calculate_total_loss, prepare_batch_and_targets
 import wandb
@@ -77,6 +77,9 @@ def sanity():
     latents_a = data_a["latents"].unsqueeze(0).to(DEVICE, Config.dtype)
     latents_b = data_b["latents"].unsqueeze(0).to(DEVICE, Config.dtype)
     
+    repa_a = load_repa_target(data_a, Config.dtype).unsqueeze(0).to(DEVICE)
+    repa_b = load_repa_target(data_b, Config.dtype).unsqueeze(0).to(DEVICE)
+    
     def get_full_text_lists(data):
         if "text_embeds_list" in data:
             embeds_list = data["text_embeds_list"].to(Config.device, Config.dtype)
@@ -93,6 +96,7 @@ def sanity():
     if can_batch:
         print(f"Resolutions match ({w_a}x{h_a}). Training in parallel (Batch Size = 2).")
         latents_batch = torch.cat([latents_a, latents_b], dim=0)
+        repa_batch = torch.cat([repa_a, repa_b], dim=0)
     else:
         print(f"Resolutions mismatch ({w_a}x{h_a} vs {w_b}x{h_b}). Training sequentially via alternating steps.")
 
@@ -219,24 +223,38 @@ def sanity():
             
             batch_data = {
                 "latents": latents_batch, 
+                "repa_target": repa_batch,
                 "text_embeds": text_embeds_batch,
-                "text_mask": text_mask_batch # Keep this as a tensor!
+                "text_mask": text_mask_batch
             }
         else:
             if step % 2 == 0:
-                batch_data = {"latents": latents_a, "text_embeds": embeds_a, "text_mask": mask_a}
+                batch_data = {"latents": latents_a, "repa_target": repa_a, "text_embeds": embeds_a, "text_mask": mask_a}
             else:
-                batch_data = {"latents": latents_b, "text_embeds": embeds_b, "text_mask": mask_b}
+                batch_data = {"latents": latents_b, "repa_target": repa_b, "text_embeds": embeds_b, "text_mask": mask_b}
                 
         x_t, t, x_1, target, text_for_model, mask_for_model = prepare_batch_and_targets(batch_data, 
                                                                                         DEVICE, 
                                                                                         Config.dtype, 
                                                                                         Config.shift_val)
                 
+        repa_target_batch = batch_data.get("repa_target", None)
+        
         with torch.autocast(device_type=DEVICE, dtype=Config.dtype):
-            loss_batch = calculate_total_loss(model, x_t, t, target, text_for_model, mask_for_model, 
-                                              Config.loss_type)
-            loss = loss_batch.mean()
+            if repa_target_batch is not None and repa_target_batch.dim() > 1:
+                loss_batch, base_loss_batch, repa_loss_batch = calculate_total_loss(model, x_t, t, target, 
+                                                                                    text_for_model, mask_for_model,
+                                                                                    Config.loss_type, 
+                                                                                    repa_target=repa_target_batch,
+                                                                                    repa_lambda=Config.repa_lambda)
+                loss = loss_batch.mean()
+                base_loss_for_bin = base_loss_batch
+                repa_loss_val = repa_loss_batch.mean().item()
+            else:
+                base_loss_batch = calculate_total_loss(model, x_t, t, target, text_for_model, mask_for_model, Config.loss_type)
+                loss = base_loss_batch.mean()
+                base_loss_for_bin = base_loss_batch
+                repa_loss_val = 0.0
                 
         optimizer.zero_grad()
         loss.backward()
@@ -247,16 +265,16 @@ def sanity():
         binned_logs = {}
         with torch.no_grad():
             t_flat = t.view(-1)
-            if (t_flat < 0.33).any(): binned_logs["loss_t_noise"] = loss_batch[t_flat < 0.33].mean().item()
-            if ((t_flat >= 0.33) & (t_flat < 0.66)).any(): binned_logs["loss_t_mid"] = loss_batch[(t_flat >= 0.33) & (t_flat < 0.66)].mean().item()
-            if (t_flat >= 0.66).any(): binned_logs["loss_t_image"] = loss_batch[t_flat >= 0.66].mean().item()
+            if (t_flat < 0.33).any(): binned_logs["loss_t_noise"] = base_loss_for_bin[t_flat < 0.33].mean().item()
+            if ((t_flat >= 0.33) & (t_flat < 0.66)).any(): binned_logs["loss_t_mid"] = base_loss_for_bin[(t_flat >= 0.33) & (t_flat < 0.66)].mean().item()
+            if (t_flat >= 0.66).any(): binned_logs["loss_t_image"] = base_loss_for_bin[t_flat >= 0.66].mean().item()
         
         lr_current = optimizer.param_groups[0]['lr']
-        log_dict = {"loss": loss.item(), "lr": lr_current}
+        log_dict = {"loss": loss.item(), "loss_repa": repa_loss_val, "lr": lr_current}
         log_dict.update(binned_logs)
         wandb.log(log_dict, step=step)
         
-        pbar.set_description(f"Step {step}|Loss {loss.item():.3f}|Loss {Config.loss_type}|LR {lr_current:.6f}|")
+        pbar.set_description(f"Step {step}|Loss {loss.item():.3f}|REPA {repa_loss_val:.3f}|Loss {Config.loss_type}|LR {lr_current:.6f}|")
                             
         if step > 0 and (step % SAMPLE_EVERY == 0 or step == STEPS - 1):
             validate(step)

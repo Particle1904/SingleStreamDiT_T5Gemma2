@@ -58,3 +58,12 @@ def get_combined_text_embeds(prompt: str, neg_prompt: str, cfg: float, text_enco
     combined_mask = torch.cat([uncond_mask.unsqueeze(0), cond_mask.unsqueeze(0)], dim=0)
     
     return combined_text, combined_mask
+
+def load_repa_target(data: dict, dtype: torch.dtype) -> torch.Tensor:
+    repa_target_quant = data.get("repa_target", None)
+    if repa_target_quant is not None:
+        if repa_target_quant.dtype == torch.int8:
+            repa_scale = data.get("repa_scale", torch.tensor(1.0))
+            return repa_target_quant.to(dtype) * repa_scale.to(dtype)
+        return repa_target_quant.to(dtype)
+    return torch.zeros(1).to(dtype)

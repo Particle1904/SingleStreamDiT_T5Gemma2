@@ -5,7 +5,7 @@ import random
 from torch.utils.data import Dataset, Sampler
 from tqdm import tqdm
 from config import Config
-from latents import normalize_latents
+from latents import normalize_latents, load_repa_target
 
 # Used for Validation on 200 flowers dataset.
 def split_dataset_indices(total_files, items_per_category=20, val_per_category=4):
@@ -77,6 +77,7 @@ class TextImageDataset(Dataset):
             
         return {
             "latents": latents.to(Config.dtype),
+            "repa_target": load_repa_target(data, Config.dtype),
             "text_embeds": text.to(Config.dtype),
             "text_mask": mask,
             "height": data["height"],
@@ -86,6 +87,7 @@ class TextImageDataset(Dataset):
 def dynamic_collate_fn(batch):
     # 1. Fast path for fixed-size properties
     latents = torch.stack([item["latents"] for item in batch])
+    repa_targets = torch.stack([item["repa_target"] for item in batch])
     heights = torch.tensor([item["height"] for item in batch])
     widths = torch.tensor([item["width"] for item in batch])
     
@@ -111,6 +113,7 @@ def dynamic_collate_fn(batch):
         
     return {
         "latents": latents,
+        "repa_target": repa_targets,
         "text_embeds": batched_texts,
         "text_mask": batched_masks,
         "height": heights,

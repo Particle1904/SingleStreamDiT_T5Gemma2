@@ -34,7 +34,7 @@ class Config:
     log_file = os.path.join(log_dir, f"{project_name}_log.csv")    
     
     # Used by sanity_check / cache inspection utilities
-    target_filename = "1349.pt"
+    target_filename = "1726.pt"
     target_file = os.path.join(cache_dir, target_filename)        
     # Resume training from a full checkpoint (model + optimizer + EMA)
     # Set to None for a fresh run or "latest" for HF model
@@ -50,6 +50,7 @@ class Config:
     # 640  -> T5Gemma2-270M-270M
     # 1152 -> T5Gemma2-1B-1B
     # 2560 -> T5Gemma2-4B-4B
+    
     text_embed_dim = 2048
 
     # DiT backbone
@@ -73,7 +74,7 @@ class Config:
     vae_id = "kaiyuyue/FLUX.2-dev-vae"
     # FLUX VAE latent channels (FLUX.1 uses 16, FLUX.2 uses 32, SD VAE uses 4)
     in_channels = 32
-    preprocess_batch_size = 12
+    preprocess_batch_size = 8
     text_model_id = "Qwen/Qwen3-1.7B" #"google/t5gemma-2-1b-1b"
     
     # ============================================================
@@ -125,6 +126,23 @@ class Config:
     text_dropout = 0.15
     # Random horizontal flip in latent space
     flip_aug = False 
+    
+    # ============================================================
+    # REGION: REPA - DINOv3
+    # Representation Alignment for Generation
+    # ============================================================
+    repa_model = "facebook/dinov3-vitb16-pretrain-lvd1689m"
+    # Feature extractor output size
+    # 384  -> ViT-S
+    # 384  -> ViT-S
+    # 768  -> ViT-B
+    # 1024 -> ViT-L
+    # 1280 -> ViT-H
+    # 4096 -> ViT-7B
+    repa_dim = 768
+    repa_layer = 8
+    # Paper uses 0.5
+    repa_lambda = 0.5
     
     # ============================================================
     # REGION: OPTIMIZATION & PRECISION

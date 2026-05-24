@@ -274,6 +274,7 @@ def train():
         
         pbar = tqdm(train_loader, disable=not accelerator.is_main_process)
         running_loss = 0.0
+        running_repa_loss = 0.0 
         micro_steps = 0
         binned_sums = {"loss_t_noise": 0.0, "loss_t_mid": 0.0, "loss_t_image": 0.0}
         binned_counts = {"loss_t_noise": 0, "loss_t_mid": 0, "loss_t_image": 0}
@@ -284,12 +285,22 @@ def train():
                                                                                  torch.float32,
                                                                                  Config.shift_val)
                 
+                repa_target = batch["repa_target"].to(Config.device, dtype=torch.float32)
+                
                 with accelerator.autocast():
-                    loss_batch = calculate_total_loss(model, x_t, t, target, text, text_mask, Config.loss_type)
+                    loss_batch, base_loss_batch, repa_loss_batch = calculate_total_loss(model, x_t, t, 
+                                                                                        target, text, 
+                                                                                        text_mask, 
+                                                                                        Config.loss_type, 
+                                                                                        repa_target=repa_target,
+                                                                                        repa_lambda=Config.repa_lambda)
                     loss = loss_batch.mean()
+                    base_loss = base_loss_batch.mean()
+                    repa_loss = repa_loss_batch.mean()
 
                 accelerator.backward(loss)
-                running_loss += loss.item()
+                running_loss += base_loss.item()
+                running_repa_loss += repa_loss.item()
                 micro_steps += 1
                          
                 with torch.no_grad():
@@ -300,7 +311,7 @@ def train():
                         (t_flat >= 0.66, "loss_t_image")
                     ]:
                         if mask.any():
-                            binned_sums[key] += loss_batch[mask].mean().item()
+                            binned_sums[key] += base_loss_batch[mask].mean().item()
                             binned_counts[key] += 1
                        
                 if accelerator.sync_gradients:
@@ -314,14 +325,16 @@ def train():
                     if global_step % LOG_EVERY_STEPS == 0:
                         lr_current = optimizer.param_groups[0]['lr']
                         curr_loss = running_loss / micro_steps
+                        curr_repa_loss = running_repa_loss / micro_steps
                         
-                        pbar.set_description(f"Epoch {epoch}|Step {global_step}|Loss {curr_loss:.3f}|Loss {Config.loss_type}|LR {lr_current:.6f}")
+                        pbar.set_description(f"Epoch {epoch}|Step {global_step}|Loss {curr_loss:.3f}|REPA {curr_repa_loss:.3f}|LR {lr_current:.6f}")
                         
                         if accelerator.is_main_process:
                             logger.log(epoch, global_step, curr_loss, lr_current)
                         
                         log_dict = {
                             "loss": curr_loss,
+                            "loss_repa": curr_repa_loss,
                             "lr": lr_current, 
                             "epoch": epoch
                         }
@@ -332,6 +345,7 @@ def train():
                         accelerator.log(log_dict, step=global_step)
                         
                         running_loss = 0.0
+                        running_repa_loss = 0.0
                         micro_steps = 0
                         binned_sums = {k: 0.0 for k in binned_sums}
                         binned_counts = {k: 0 for k in binned_counts}
