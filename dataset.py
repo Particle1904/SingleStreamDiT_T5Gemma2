@@ -66,27 +66,14 @@ class TextImageDataset(Dataset):
             text = data["text_embeds"]
             mask = data.get("attention_mask", torch.ones(text.shape[0], dtype=torch.bool))
 
-        curr_len = text.shape[0]
         target_len = Config.max_token_length
-        if curr_len < target_len:
-            pad_len = target_len - curr_len
-            
-            pad_text = torch.zeros(pad_len, text.shape[1], dtype=text.dtype, device=text.device)
-            text = torch.cat([text, pad_text], dim=0)
-            
-            pad_mask = torch.zeros(pad_len, dtype=torch.bool, device=mask.device)
-            mask = torch.cat([mask, pad_mask], dim=0)
-        elif curr_len > target_len:
+        if text.shape[0] > target_len:
             text = text[:target_len]
             mask = mask[:target_len]
-        # ==========================================================
 
         latents = normalize_latents(latents)
         if Config.flip_aug and random.random() < 0.5:
             latents = torch.flip(latents, dims=[-1])
-        if random.random() < Config.text_dropout:
-            text = torch.zeros_like(text)
-            mask = torch.ones_like(mask)
             
         return {
             "latents": latents.to(Config.dtype),
@@ -95,6 +82,40 @@ class TextImageDataset(Dataset):
             "height": data["height"],
             "width": data["width"]
         }
+        
+def dynamic_collate_fn(batch):
+    # 1. Fast path for fixed-size properties
+    latents = torch.stack([item["latents"] for item in batch])
+    heights = torch.tensor([item["height"] for item in batch])
+    widths = torch.tensor([item["width"] for item in batch])
+    
+    # 2. Dynamic Text Padding (Pre-allocation method for maximum speed)
+    texts = [item["text_embeds"] for item in batch]
+    masks = [item["text_mask"] for item in batch]
+    
+    # Find the maximum sequence length in THIS specific batch
+    max_len = max(t.shape[0] for t in texts)
+    B = len(batch)
+    D = texts[0].shape[1] # Text embedding dimension
+    dtype = texts[0].dtype
+    
+    # Pre-allocate contiguous blocks of memory (blazingly fast)
+    batched_texts = torch.zeros((B, max_len, D), dtype=dtype)
+    batched_masks = torch.zeros((B, max_len), dtype=torch.bool)
+    
+    # Copy data into the pre-allocated tensors
+    for i in range(B):
+        seq_len = texts[i].shape[0]
+        batched_texts[i, :seq_len, :] = texts[i]
+        batched_masks[i, :seq_len] = masks[i]
+        
+    return {
+        "latents": latents,
+        "text_embeds": batched_texts,
+        "text_mask": batched_masks,
+        "height": heights,
+        "width": widths
+    }
 
 class BucketBatchSampler(Sampler):
     def __init__(self, buckets, batch_size, drop_last=False):

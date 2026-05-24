@@ -6,7 +6,6 @@ from tqdm import tqdm
 from model import SingleStreamDiT
 from diffusers import AutoencoderKL
 from PIL import Image, ImageDraw, ImageFont
-from torch.optim.swa_utils import AveragedModel, get_ema_multi_avg_fn
 from transformers import get_cosine_schedule_with_warmup 
 from diffusers.models import AutoencoderKL as DiffusersAutoencoderKL
 from model_loader import load_vae
@@ -71,8 +70,20 @@ def sanity():
     
     model.initialize_weights() 
     print_model_parameters(model)
-    ema_model = AveragedModel(model, multi_avg_fn=get_ema_multi_avg_fn(Config.ema_decay))
-    optimizer = bnb.optim.AdamW8bit(model.parameters(), lr=LEARNING_RATE, weight_decay=Config.weight_decay)
+    decay, no_decay = [], []
+    for name, param in model.named_parameters():
+        if not param.requires_grad:
+            continue
+        if "norm" in name.lower() or "bias" in name.lower():
+            no_decay.append(param)
+        else:
+            decay.append(param)
+            
+    optim_groups = [
+        {"params": decay, "weight_decay": Config.weight_decay},
+        {"params": no_decay, "weight_decay": 0.0}
+    ]
+    optimizer = bnb.optim.AdamW8bit(optim_groups, lr=LEARNING_RATE)
     
     warmup_steps = int(STEPS * Config.optimizer_warmup)
     scheduler = get_cosine_schedule_with_warmup(optimizer, num_warmup_steps=warmup_steps, num_training_steps=STEPS)
@@ -80,39 +91,33 @@ def sanity():
     vae = load_vae()
 
     def validate(step_count):
-        model.eval()
         with torch.no_grad():
             torch_generator = torch.Generator(device=DEVICE).manual_seed(42)
-            initial_noise = torch.randn(1, Config.in_channels, h // Config.vae_downsample_factor, 
-                                        w // Config.vae_downsample_factor, generator=torch_generator, device=DEVICE, 
+            initial_noise = torch.randn(1, Config.in_channels, h // Config.vae_downsample_factor,
+                                        w // Config.vae_downsample_factor, generator=torch_generator, device=DEVICE,
                                         dtype=Config.dtype)
-   
             uncond_embeds = torch.zeros_like(text_embeds)
-            uncond_mask = torch.ones_like(text_mask)
+            uncond_mask = text_mask.clone()
             combined_text_embeds = torch.cat([uncond_embeds, text_embeds], dim=0)
             combined_mask = torch.cat([uncond_mask, text_mask], dim=0)
-                 
+                
             x_euler = initial_noise.clone()
             x_rk4 = None
-            
             with torch.autocast(device_type=DEVICE, dtype=Config.dtype):
-                x_euler = run_sampling_pipeline(model=model, initial_noise=x_euler, steps=SAMPLE_STEPS, 
-                                                combined_text_embeds=combined_text_embeds, cfg=1.0, 
-                                                sampler_type="euler", scheduler_type="uniform", 
+                x_euler = run_sampling_pipeline(model=model, initial_noise=x_euler, steps=SAMPLE_STEPS,
+                                                combined_text_embeds=combined_text_embeds, cfg=1.0,
+                                                sampler_type="euler", scheduler_type="uniform",
                                                 shift_val=Config.shift_val, text_mask=combined_mask)
                 if ENABLE_RK4:
                     x_rk4 = run_sampling_pipeline(model=model, initial_noise=initial_noise.clone(), steps=SAMPLE_STEPS,
-                                                  combined_text_embeds=combined_text_embeds, cfg=1.0, 
+                                                  combined_text_embeds=combined_text_embeds, cfg=1.0,
                                                   sampler_type="rk4", scheduler_type="karras",
                                                   shift_val=Config.shift_val, text_mask=combined_mask)
-
             img_pil_euler = decode_latents_to_image(vae_model=vae, latents=x_euler, device=DEVICE)
             img_list = [img_pil_euler]
-            
             if ENABLE_RK4:
                 img_pil_rk4 = decode_latents_to_image(vae_model=vae, latents=x_rk4, device=DEVICE)
                 img_list.append(img_pil_rk4)
-
             w_euler, h_img = img_pil_euler.size
             w_total = w_euler * len(img_list)
             label_height = 40
@@ -121,27 +126,21 @@ def sanity():
             for img_pil in img_list:
                 canvas.paste(img_pil, (current_x, label_height))
                 current_x += img_pil.size[0]
-                
             draw = ImageDraw.Draw(canvas)
-
             try:
                 font = ImageFont.truetype("arial.ttf", 20)
             except:
                 font = ImageFont.load_default()
-
             label_y = label_height // 2
-            
             if ENABLE_RK4:
                 half_w = w_total // 2
                 draw.text((half_w // 2, label_y), "Euler", fill=(255, 255, 255), font=font, anchor="mm")
                 draw.text((half_w + half_w // 2, label_y), "RK4", fill=(255, 255, 255), font=font, anchor="mm")
             else:
                 draw.text((w_total // 2, label_y), "Euler", fill=(255, 255, 255), font=font, anchor="mm")
-
             filename = f"sanity_match_step_{step_count:04d}.png"
             canvas.save(filename)
             wandb.log({"sanity_sample": wandb.Image(canvas)}, step=step_count)
-             
         model.train()
         
     print(f"Starting Overfit (Shift={Config.shift_val})...")
@@ -153,10 +152,12 @@ def sanity():
             "text_embeds": text_embeds,
             "text_mask": text_mask
         }
-        x_t, t, x_1, target, text_for_model, mask_for_model = prepare_batch_and_targets(batch_data, DEVICE, 
+        
+        x_t, t, x_1, target, text_for_model, mask_for_model = prepare_batch_and_targets(batch_data, 
+                                                                                        DEVICE, 
                                                                                         Config.dtype, 
                                                                                         Config.shift_val)
-        
+                
         with torch.autocast(device_type=DEVICE, dtype=Config.dtype):
             loss_batch = calculate_total_loss(model, x_t, t, target, text_for_model, mask_for_model, 
                                               Config.loss_type)
@@ -167,7 +168,6 @@ def sanity():
         torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
         optimizer.step()
         scheduler.step()
-        ema_model.update_parameters(model)
         
         binned_logs = {}
         with torch.no_grad():

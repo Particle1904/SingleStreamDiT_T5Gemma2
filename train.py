@@ -18,7 +18,7 @@ from torch.optim.swa_utils import AveragedModel, get_ema_multi_avg_fn
 from transformers import get_cosine_schedule_with_warmup
 from model import SingleStreamDiT
 from config import Config, parse_config_args
-from dataset import TextImageDataset, BucketBatchSampler
+from dataset import TextImageDataset, BucketBatchSampler, dynamic_collate_fn
 from latents import decode_latents_to_image
 from model_loader import load_vae
 from samplers import run_sampling_pipeline
@@ -43,6 +43,21 @@ Config.checkpoint_dir = os.path.join(Config.output_dir, "checkpoints")
 Config.samples_dir = os.path.join(Config.output_dir, "samples")
 Config.log_file = os.path.join(Config.output_dir, "logs", f"{Config.project_name}_log.csv")
 
+class FSDPAwareEMA:
+    def __init__(self, ema_model, decay=0.999):
+        self.ema_model = ema_model
+        self.decay = decay
+
+    @torch.no_grad()
+    def update(self, accelerator, model):
+        unwrapped_model = accelerator.unwrap_model(model)
+        ema_state = self.ema_model.state_dict()
+        for name, param in unwrapped_model.named_parameters():
+            if param.requires_grad:
+                ema_param = ema_state[name]
+                updated = ema_param.float() * self.decay + param.data.float() * (1 - self.decay)
+                ema_param.copy_(updated.to(ema_param.dtype))
+                
 def can_attempt_resume(resume_value):
     return resume_value is not None
 
@@ -73,7 +88,7 @@ def validate(accelerator, model, vae, epoch, global_step, is_ema=False):
         text_embeds = data["text_embeds"].unsqueeze(0).to(Config.device, Config.dtype)
         text_mask = data["attention_mask"].unsqueeze(0).to(Config.device)
     uncond_embeds = torch.zeros_like(text_embeds)
-    uncond_mask = torch.ones_like(text_mask)
+    uncond_mask = text_mask.clone()
     combined_text_embeds = torch.cat([uncond_embeds, text_embeds], dim=0)
     combined_mask = torch.cat([uncond_mask, text_mask], dim=0)
 
@@ -148,20 +163,13 @@ def train():
         depth=Config.depth,
         num_heads=Config.num_heads,
         text_embed_dim=Config.text_embed_dim,
-        gradient_checkpointing=Config.gradient_checkpointing,
         refiner_depth=Config.refiner_depth,
-        max_token_length=Config.max_token_length,
-        dropout=Config.model_dropout,
-        rope_base=Config.rope_base
-    ).to(Config.device, model_dtype)
+    ).to(Config.device, Config.dtype)
     
     vae = load_vae()
     
     model.initialize_weights()
     print_model_parameters(model)
-    ema_model = AveragedModel(model, multi_avg_fn=get_ema_multi_avg_fn(Config.ema_decay))
-    ema_model.eval()
-    ema_model.requires_grad_(False)
     
     full_dataset = TextImageDataset()
     train_idx_set = set(range(len(full_dataset)))
@@ -178,17 +186,39 @@ def train():
             if sharded_indices:
                 new_buckets[res] = sharded_indices
         train_buckets = new_buckets
-    train_loader = DataLoader(full_dataset, 
-                              batch_sampler=BucketBatchSampler(train_buckets, batch_size=Config.batch_size), 
-                              num_workers=Config.num_workers)
+    train_loader = DataLoader(full_dataset,
+                              batch_sampler=BucketBatchSampler(train_buckets, batch_size=Config.batch_size),
+                              num_workers=Config.num_workers,
+                              collate_fn=dynamic_collate_fn,
+                              pin_memory=torch.cuda.is_available(),
+                              persistent_workers=Config.num_workers > 0)
     
     steps_per_epoch = math.ceil(len(train_loader) / Config.accum_steps)
     total_steps = steps_per_epoch * Config.epochs
     warmup_steps = int(total_steps * Config.optimizer_warmup)
 
-    optimizer = bnb.optim.AdamW8bit(model.parameters(), lr=Config.learning_rate, weight_decay=Config.weight_decay)
+    decay, no_decay = [], []
+    for name, param in model.named_parameters():
+        if not param.requires_grad:
+            continue
+        if "norm" in name.lower() or "bias" in name.lower():
+            no_decay.append(param)
+        else:
+            decay.append(param)
+            
+    optim_groups = [
+        {"params": decay, "weight_decay": Config.weight_decay},
+        {"params": no_decay, "weight_decay": 0.0}
+    ]
+    optimizer = bnb.optim.AdamW8bit(optim_groups, lr=Config.learning_rate)
     
-    scheduler = get_cosine_schedule_with_warmup(optimizer, num_warmup_steps=warmup_steps, num_training_steps=total_steps)
+    ema_model = copy.deepcopy(model).to(torch.float32)
+    ema_model.eval()
+    ema_model.requires_grad_(False)
+    ema_updater = FSDPAwareEMA(ema_model, decay=Config.ema_decay)
+    
+    scheduler = get_cosine_schedule_with_warmup(optimizer, num_warmup_steps=warmup_steps, 
+                                                num_training_steps=total_steps)
     
     start_epoch = 0
     global_step = 0
@@ -251,7 +281,9 @@ def train():
         binned_counts = {"loss_t_noise": 0, "loss_t_mid": 0, "loss_t_image": 0}
         for step, batch in enumerate(pbar):
             with accelerator.accumulate(model):
-                x_t, t, x_1, target, text, text_mask = prepare_batch_and_targets(batch, Config.device, torch.float32,
+                x_t, t, x_1, target, text, text_mask = prepare_batch_and_targets(batch, 
+                                                                                 Config.device, 
+                                                                                 torch.float32,
                                                                                  Config.shift_val)
                 
                 with accelerator.autocast():
@@ -279,7 +311,7 @@ def train():
                     optimizer.step()
                     scheduler.step()
                     optimizer.zero_grad()
-                    ema_model.update_parameters(accelerator.unwrap_model(model))
+                    ema_updater.update(accelerator, model)
                                         
                     if global_step % LOG_EVERY_STEPS == 0:
                         lr_current = optimizer.param_groups[0]['lr']
@@ -310,7 +342,8 @@ def train():
             accelerator.wait_for_everyone()
             unwrapped_model = accelerator.unwrap_model(model)
             validate(accelerator, unwrapped_model, vae, display_epoch, global_step, is_ema=False)
-            validate(accelerator, ema_model.module, vae, display_epoch, global_step, is_ema=True)
+            actual_ema = ema_model.module if hasattr(ema_model, 'module') else ema_model
+            validate(accelerator, actual_ema, vae, display_epoch, global_step, is_ema=True)
             accelerator.wait_for_everyone()
             
         if accelerator.is_main_process and display_epoch > 0 and display_epoch % Config.save_every == 0:

@@ -5,7 +5,6 @@ import bitsandbytes as bnb
 from tqdm import tqdm
 from model import SingleStreamDiT
 from PIL import Image, ImageDraw, ImageFont
-from torch.optim.swa_utils import AveragedModel, get_ema_multi_avg_fn
 from transformers import get_cosine_schedule_with_warmup 
 from model_loader import load_vae
 from config import Config
@@ -109,8 +108,20 @@ def sanity():
     
     model.initialize_weights() 
     print_model_parameters(model)
-    ema_model = AveragedModel(model, multi_avg_fn=get_ema_multi_avg_fn(Config.ema_decay))
-    optimizer = bnb.optim.AdamW8bit(model.parameters(), lr=LEARNING_RATE, weight_decay=Config.weight_decay)
+    decay, no_decay = [], []
+    for name, param in model.named_parameters():
+        if not param.requires_grad:
+            continue
+        if "norm" in name.lower() or "bias" in name.lower():
+            no_decay.append(param)
+        else:
+            decay.append(param)
+            
+    optim_groups = [
+        {"params": decay, "weight_decay": Config.weight_decay},
+        {"params": no_decay, "weight_decay": 0.0}
+    ]
+    optimizer = bnb.optim.AdamW8bit(optim_groups, lr=LEARNING_RATE)
     
     warmup_steps = int(STEPS * Config.optimizer_warmup)
     scheduler = get_cosine_schedule_with_warmup(optimizer, num_warmup_steps=warmup_steps, num_training_steps=STEPS)
@@ -118,23 +129,22 @@ def sanity():
     vae = load_vae()
 
     def generate_sample(embeds, mask, h, w, torch_generator):
-        initial_noise = torch.randn(1, Config.in_channels, h // Config.vae_downsample_factor, 
-                                      w // Config.vae_downsample_factor, generator=torch_generator, device=DEVICE, 
+        initial_noise = torch.randn(1, Config.in_channels, h // Config.vae_downsample_factor,
+                                      w // Config.vae_downsample_factor, generator=torch_generator, device=DEVICE,
                                       dtype=Config.dtype)
         uncond_embeds = torch.zeros_like(embeds)
-        uncond_mask = torch.ones_like(mask)
-        comb_embeds = torch.cat([uncond_embeds, embeds], dim=0)
-        comb_mask = torch.cat([uncond_mask, mask], dim=0)
+        uncond_mask = mask.clone()
+        combined_text_embeds = torch.cat([uncond_embeds, embeds], dim=0)
+        combined_mask = torch.cat([uncond_mask, mask], dim=0)
         
         with torch.autocast(device_type=DEVICE, dtype=Config.dtype):
-            x_euler = run_sampling_pipeline(model=model, initial_noise=initial_noise, steps=SAMPLE_STEPS, 
-                                              combined_text_embeds=comb_embeds, cfg=1.0, 
-                                              sampler_type="euler", scheduler_type="uniform", 
-                                              shift_val=Config.shift_val, text_mask=comb_mask)
+            x_euler = run_sampling_pipeline(model=model, initial_noise=initial_noise, steps=SAMPLE_STEPS,
+                                              combined_text_embeds=combined_text_embeds, cfg=1.0,
+                                              sampler_type="euler", scheduler_type="uniform",
+                                              shift_val=Config.shift_val, text_mask=combined_mask)
         return decode_latents_to_image(vae_model=vae, latents=x_euler, device=DEVICE)
 
     def validate(step_count):
-        model.eval()
         with torch.no_grad():
             torch_generator = torch.Generator(device=DEVICE).manual_seed(42)
             label_height = 40
@@ -191,12 +201,26 @@ def sanity():
         mask_b = mask_list_b[idx_b].unsqueeze(0)
 
         if can_batch:
+            # ⚡ Keep dynamic text padding
+            max_len = max(embeds_a.shape[1], embeds_b.shape[1])
+            
+            if embeds_a.shape[1] < max_len:
+                pad_len = max_len - embeds_a.shape[1]
+                embeds_a = torch.cat([embeds_a, torch.zeros(1, pad_len, embeds_a.shape[2], device=DEVICE, dtype=Config.dtype)], dim=1)
+                mask_a = torch.cat([mask_a, torch.zeros(1, pad_len, device=DEVICE, dtype=torch.bool)], dim=1)
+                
+            if embeds_b.shape[1] < max_len:
+                pad_len = max_len - embeds_b.shape[1]
+                embeds_b = torch.cat([embeds_b, torch.zeros(1, pad_len, embeds_b.shape[2], device=DEVICE, dtype=Config.dtype)], dim=1)
+                mask_b = torch.cat([mask_b, torch.zeros(1, pad_len, device=DEVICE, dtype=torch.bool)], dim=1)
+
             text_embeds_batch = torch.cat([embeds_a, embeds_b], dim=0)
             text_mask_batch = torch.cat([mask_a, mask_b], dim=0)
+            
             batch_data = {
                 "latents": latents_batch, 
                 "text_embeds": text_embeds_batch,
-                "text_mask": text_mask_batch
+                "text_mask": text_mask_batch # Keep this as a tensor!
             }
         else:
             if step % 2 == 0:
@@ -204,10 +228,11 @@ def sanity():
             else:
                 batch_data = {"latents": latents_b, "text_embeds": embeds_b, "text_mask": mask_b}
                 
-        x_t, t, x_1, target, text_for_model, mask_for_model = prepare_batch_and_targets(batch_data, DEVICE, 
+        x_t, t, x_1, target, text_for_model, mask_for_model = prepare_batch_and_targets(batch_data, 
+                                                                                        DEVICE, 
                                                                                         Config.dtype, 
                                                                                         Config.shift_val)
-        
+                
         with torch.autocast(device_type=DEVICE, dtype=Config.dtype):
             loss_batch = calculate_total_loss(model, x_t, t, target, text_for_model, mask_for_model, 
                                               Config.loss_type)
@@ -218,7 +243,6 @@ def sanity():
         torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
         optimizer.step()
         scheduler.step()
-        ema_model.update_parameters(model)
         
         binned_logs = {}
         with torch.no_grad():
