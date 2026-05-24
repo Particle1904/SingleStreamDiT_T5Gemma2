@@ -162,7 +162,7 @@ def train():
         num_heads=Config.num_heads,
         text_embed_dim=Config.text_embed_dim,
         refiner_depth=Config.refiner_depth,
-    ).to(Config.device, torch.float32
+    ).to(Config.device, model_dtype)
     
     vae = load_vae()
     
