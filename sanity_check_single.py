@@ -162,13 +162,16 @@ def sanity():
             
         repa_target_batch = batch_data.get("repa_target", None)
             
+        is_repa_active = step < (STEPS * Config.repa_cutoff)
+        current_repa_lambda = Config.repa_lambda if is_repa_active else 0.0
+            
         with torch.autocast(device_type=DEVICE, dtype=Config.dtype):
             if repa_target_batch is not None and repa_target_batch.dim() > 1:
                 loss_batch, base_loss_batch, repa_loss_batch = calculate_total_loss(model, x_t, t, target, 
                                                                                     text_for_model, mask_for_model,
                                                                                     Config.loss_type, 
                                                                                     repa_target=repa_target_batch, 
-                                                                                    repa_lambda=Config.repa_lambda)
+                                                                                    repa_lambda=current_repa_lambda)
                 loss = loss_batch.mean()
                 base_loss_for_bin = base_loss_batch
                 repa_loss_val = repa_loss_batch.mean().item()

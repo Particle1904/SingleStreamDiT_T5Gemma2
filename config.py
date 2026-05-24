@@ -143,6 +143,8 @@ class Config:
     repa_layer = 8
     # Paper uses 0.5
     repa_lambda = 0.5
+    # Stop REPA after repa_cutoff % of total training epochs
+    repa_cutoff = 0.30 
     
     # ============================================================
     # REGION: OPTIMIZATION & PRECISION

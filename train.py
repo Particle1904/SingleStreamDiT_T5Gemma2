@@ -272,6 +272,9 @@ def train():
     for epoch in range(start_epoch, Config.epochs):
         display_epoch = epoch + 1
         
+        is_repa_active = epoch < (Config.epochs * Config.repa_cutoff)
+        current_repa_lambda = Config.repa_lambda if is_repa_active else 0.0
+        
         pbar = tqdm(train_loader, disable=not accelerator.is_main_process)
         running_loss = 0.0
         running_repa_loss = 0.0 
@@ -293,7 +296,7 @@ def train():
                                                                                         text_mask, 
                                                                                         Config.loss_type, 
                                                                                         repa_target=repa_target,
-                                                                                        repa_lambda=Config.repa_lambda)
+                                                                                        repa_lambda=current_repa_lambda)
                     loss = loss_batch.mean()
                     base_loss = base_loss_batch.mean()
                     repa_loss = repa_loss_batch.mean()
