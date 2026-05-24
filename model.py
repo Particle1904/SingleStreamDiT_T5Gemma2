@@ -66,9 +66,12 @@ class SwiGLUWithImageConv(nn.Module):
                 img_spatial = img_part.view(B, grid_h, grid_w, C).permute(0, 3, 1, 2)
                 img_spatial = self.dwconv(img_spatial)
                 img_mixed = img_spatial.permute(0, 2, 3, 1).reshape(B, L, C)
-                gated = gated + (self.dwconv.weight.sum() * 0.0).to(gated.dtype)
-                if self.dwconv.bias is not None:
-                    gated = gated + (self.dwconv.bias.sum() * 0.0).to(gated.dtype)
+                
+                gated = torch.cat([text_part, img_mixed], dim=1) 
+        else:
+            gated = gated + (self.dwconv.weight.sum() * 0.0).to(gated.dtype)
+            if self.dwconv.bias is not None:
+                gated = gated + (self.dwconv.bias.sum() * 0.0).to(gated.dtype)
                 
         return self.w3(gated)
 
