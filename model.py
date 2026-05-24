@@ -66,7 +66,9 @@ class SwiGLUWithImageConv(nn.Module):
                 img_spatial = img_part.view(B, grid_h, grid_w, C).permute(0, 3, 1, 2)
                 img_spatial = self.dwconv(img_spatial)
                 img_mixed = img_spatial.permute(0, 2, 3, 1).reshape(B, L, C)
-                gated = torch.cat([text_part, img_mixed], dim=1)
+                gated = gated + (self.dwconv.weight.sum() * 0.0).to(gated.dtype)
+                if self.dwconv.bias is not None:
+                    gated = gated + (self.dwconv.bias.sum() * 0.0).to(gated.dtype)
                 
         return self.w3(gated)
 
@@ -271,7 +273,7 @@ class SingleStreamDiT(nn.Module):
         self.cond_dropout_prob = cond_dropout_prob
         self.max_token_length = max_token_length
 
-        patch_sizes = [1, 2]
+        patch_sizes = [patch_size]
         self.x_embedders = nn.ModuleDict({
             str(ps): nn.Linear(self.in_channels * ps**2, self.hidden_size) for ps in patch_sizes
         })
