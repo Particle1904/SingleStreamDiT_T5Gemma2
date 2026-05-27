@@ -24,16 +24,21 @@ def get_base_loss(v_pred, target, loss_type):
         return F.mse_loss(v_pred, target, reduction='none').mean(dim=(1, 2, 3))
 
 def calculate_total_loss(model, x_t, t, target, text, text_mask, loss_type, repa_target=None, repa_lambda=0.5):
-    if repa_target is not None and repa_lambda > 0.0:
-        v_pred, repa_pred = model(x_t, t, text, text_mask, return_repa=True)
-        base_loss = get_base_loss(v_pred, target, loss_type)
-        
+    v_pred, repa_pred = model(x_t, t, text, text_mask, return_repa=True)
+    base_loss = get_base_loss(v_pred, target, loss_type)
+
+    if repa_target is not None:
+        # REPA loss
         cos_sim = F.cosine_similarity(repa_pred, repa_target, dim=-1)
         repa_loss = (1.0 - cos_sim).mean(dim=1)
         
+        # If repa_lambda is 0.0, this safely routes a 0.0 gradient to repa_proj
         total_loss = base_loss + repa_lambda * repa_loss
         return total_loss, base_loss, repa_loss
     else:
-        v_pred = model(x_t, t, text, text_mask)
-        base_loss = get_base_loss(v_pred, target, loss_type)
-        return base_loss, base_loss, torch.zeros_like(base_loss)
+        # When REPA is completely disabled (no targets provided)
+        # We do a dummy 0.0 multiplication so DDP doesn't crash from missing gradients.
+        dummy_loss = repa_pred.sum() * 0.0
+        total_loss = base_loss + dummy_loss
+        
+        return total_loss, base_loss, torch.zeros_like(base_loss)
