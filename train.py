@@ -288,7 +288,12 @@ def train():
                                                                                  torch.float32,
                                                                                  Config.shift_val)
                 
-                repa_target = batch["repa_target"].to(Config.device, dtype=torch.float32)
+                if current_repa_lambda > 0.0:
+                    repa_target = batch.get("repa_target")
+                    if repa_target is not None:
+                        repa_target = repa_target.to(Config.device, dtype=torch.float32)
+                else:
+                    repa_target = None
                 
                 with accelerator.autocast():
                     loss_batch, base_loss_batch, repa_loss_batch = calculate_total_loss(model, x_t, t, 
