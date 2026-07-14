@@ -4,19 +4,26 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.checkpoint import checkpoint
-
 from config import Config
+
+try:
+    from flash_attn import flash_attn_func
+    HAS_FLASH_ATTN = True
+except ImportError:
+    HAS_FLASH_ATTN = False
+    
+print(f"[ATTENTION BACKEND] flash_attn package available: {HAS_FLASH_ATTN}")
 
 class RMSNorm(nn.Module):
     def __init__(self, dim: int, eps: float = 1e-5):
         super().__init__()
         self.eps = eps
-        self.weight = nn.Parameter(torch.ones(dim))
+        self.weight = nn.Parameter(torch.zeros(dim)) 
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         variance = x.to(torch.float32).pow(2).mean(-1, keepdim=True)
         normed = x * torch.rsqrt(variance + self.eps).to(x.dtype)
-        return normed * self.weight.to(x.dtype)
+        return normed * (1.0 + self.weight.to(x.dtype))
 
 class TimestepEmbedder(nn.Module):
     def __init__(self, hidden_size: int):
@@ -141,29 +148,36 @@ def apply_rotary_emb(x: torch.Tensor, rope_freqs: Tuple[torch.Tensor, torch.Tens
 def dispatch_attention(q, k, v, attn_mask=None):
     B, N_q, H_q, D = q.shape
     _, N_k, H_k, _ = k.shape
-    
+
+    if HAS_FLASH_ATTN and attn_mask is None and q.is_cuda and q.dtype in (torch.float16, torch.bfloat16):
+        if not getattr(dispatch_attention, "_announced_fast", False):
+            print("[ATTENTION BACKEND] Using flash_attn fast path")
+            dispatch_attention._announced_fast = True
+        return flash_attn_func(q.contiguous(), k.contiguous(), v.contiguous(), causal=False)
+
     q, k, v = q.transpose(1, 2), k.transpose(1, 2), v.transpose(1, 2)
-    
+
     if H_k != H_q:
         num_groups = H_q // H_k
-        k = k[:, :, None, :, :].expand(B, H_k, num_groups, N_k, D).flatten(1, 2)
-        v = v[:, :, None, :, :].expand(B, H_k, num_groups, N_k, D).flatten(1, 2)
-        
+        k = k[:, :, None, :, :].expand(B, H_k, num_groups, N_k, D).reshape(B, H_q, N_k, D)
+        v = v[:, :, None, :, :].expand(B, H_k, num_groups, N_k, D).reshape(B, H_q, N_k, D)
+
     if attn_mask is not None:
         if attn_mask.dtype == torch.bool:
             float_mask = torch.zeros_like(attn_mask, dtype=q.dtype)
             float_mask.masked_fill_(~attn_mask, float("-inf"))
             attn_mask = float_mask
-        # -----------------------------------------
-        
         if attn_mask.ndim == 2:
             attn_mask = attn_mask.unsqueeze(1).unsqueeze(2)
-    
+
+    if not getattr(dispatch_attention, "_announced_fallback", False):
+        print("[ATTENTION BACKEND] Using SDPA fallback path")
+        dispatch_attention._announced_fallback = True
     with torch.nn.attention.sdpa_kernel([torch.nn.attention.SDPBackend.FLASH_ATTENTION,
                                          torch.nn.attention.SDPBackend.EFFICIENT_ATTENTION,
                                          torch.nn.attention.SDPBackend.MATH]):
         out = F.scaled_dot_product_attention(q, k, v, attn_mask=attn_mask)
-        
+
     return out.transpose(1, 2)
 
 class TransformerBlock(nn.Module):
@@ -181,6 +195,9 @@ class TransformerBlock(nn.Module):
         self.attn_v = nn.Linear(dim, n_kv_heads * self.head_dim, bias=False)
         self.attn_out = nn.Linear(num_heads * self.head_dim, dim, bias=False)
 
+        self.attn_gate = nn.Linear(dim, num_heads * self.head_dim, bias=False)
+        nn.init.zeros_(self.attn_gate.weight)
+
         self.norm_q = RMSNorm(self.head_dim)
         self.norm_k = RMSNorm(self.head_dim)
 
@@ -188,8 +205,7 @@ class TransformerBlock(nn.Module):
         self.ffn = SwiGLUWithImageConv(dim, dim * 4)
 
         if use_adaLN:
-            self.adaLN_msa = nn.Sequential(nn.SiLU(), nn.Linear(dim, 3 * dim, bias=True))
-            self.adaLN_mlp = nn.Sequential(nn.SiLU(), nn.Linear(dim, 3 * dim, bias=True))
+            self.mod_bias = nn.Parameter(torch.zeros(6 * dim))
 
     def forward(
         self, 
@@ -205,9 +221,7 @@ class TransformerBlock(nn.Module):
         B, N, C = x.shape
 
         if self.use_adaLN and c is not None:
-            shift_msa, scale_msa, gate_msa = self.adaLN_msa(c).chunk(3, dim=-1)
-            shift_mlp, scale_mlp, gate_mlp = self.adaLN_mlp(c).chunk(3, dim=-1)
-            
+            shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp = (c + self.mod_bias).chunk(6, dim=-1)
             x_norm = self.norm1(x)
             x_modulated = x_norm * (1 + scale_msa.unsqueeze(1)) + shift_msa.unsqueeze(1)
         else:
@@ -226,6 +240,10 @@ class TransformerBlock(nn.Module):
             k = apply_rotary_emb(k.transpose(1, 2), rope_freqs).transpose(1, 2)
 
         attn_out = dispatch_attention(q, k, v, attn_mask=attn_mask)
+        
+        gate = F.sigmoid(self.attn_gate(x_modulated)).view(B, N, self.num_heads, self.head_dim)
+        attn_out = attn_out * gate
+        
         attn_out = self.attn_out(attn_out.reshape(B, N, -1))
         
         if gate_msa is not None:
@@ -293,6 +311,10 @@ class SingleStreamDiT(nn.Module):
             nn.Linear(self.text_embed_dim, self.hidden_size)
         )
         self.t_embedder = TimestepEmbedder(self.hidden_size)
+        self.t_adaLN_proj = nn.Sequential(
+            nn.SiLU(), 
+            nn.Linear(self.hidden_size, 6 * self.hidden_size, bias=True)
+        )
         self.cap_pad_token = nn.Parameter(torch.zeros(1, 1, self.hidden_size))
 
         head_dim = self.hidden_size // self.num_heads
@@ -359,14 +381,14 @@ class SingleStreamDiT(nn.Module):
                 if m.bias is not None:
                     nn.init.zeros_(m.bias)
             elif isinstance(m, RMSNorm):
-                nn.init.ones_(m.weight)
+                nn.init.zeros_(m.weight)
 
-        for block in self.noise_refiner + self.blocks:
-            nn.init.constant_(block.adaLN_msa[-1].weight, 0)
-            nn.init.constant_(block.adaLN_msa[-1].bias, 0)
-            nn.init.constant_(block.adaLN_mlp[-1].weight, 0)
-            nn.init.constant_(block.adaLN_mlp[-1].bias, 0)
+        nn.init.zeros_(self.t_adaLN_proj[-1].weight)
+        nn.init.zeros_(self.t_adaLN_proj[-1].bias)
             
+        for block in self.noise_refiner + self.context_refiner + self.blocks:
+            nn.init.zeros_(block.attn_gate.weight)
+
         for block in self.context_refiner:
             nn.init.constant_(block.attn_out.weight, 0)
             nn.init.constant_(block.ffn.w3.weight, 0)
@@ -412,6 +434,7 @@ class SingleStreamDiT(nn.Module):
         context = torch.where(is_null, self.cap_pad_token.expand_as(context), context)
 
         t_emb = self.t_embedder(t)
+        t_emb_projected = self.t_adaLN_proj(t_emb)
 
         # Calculate Positional Coordinates
         rope_freqs_all = self.get_rope_freqs(seq_len_text, grid_h, grid_w, x.device, p, B, text_mask)
@@ -422,11 +445,11 @@ class SingleStreamDiT(nn.Module):
         for block in self.noise_refiner:
             if gradient_checkpointing:
                 x_embedded = checkpoint(
-                    block, x_embedded, t_emb, None, 0, grid_h, grid_w, rope_img, True, use_reentrant=False
+                    block, x_embedded, t_emb_projected, None, 0, grid_h, grid_w, rope_img, True, use_reentrant=False
                 )
             else:
                 x_embedded = block(
-                    x_embedded, t_emb, None, 0, grid_h, grid_w, rope_img, True
+                    x_embedded, t_emb_projected, None, 0, grid_h, grid_w, rope_img, True
                 )
 
         for block in self.context_refiner:
@@ -455,10 +478,10 @@ class SingleStreamDiT(nn.Module):
 
         for i, block in enumerate(self.blocks):
             if gradient_checkpointing:
-                unified = checkpoint(block, unified, t_emb, unified_mask, seq_len_text, grid_h, grid_w,
+                unified = checkpoint(block, unified, t_emb_projected, unified_mask, seq_len_text, grid_h, grid_w,
                                      rope_freqs_all, True, use_reentrant=False)
             else:
-                unified = block(unified, t_emb, unified_mask, seq_len_text, grid_h, grid_w, rope_freqs_all, True)
+                unified = block(unified, t_emb_projected, unified_mask, seq_len_text, grid_h, grid_w, rope_freqs_all, True)
             
             if return_repa and i == self.repa_layer:
                 repa_features = unified[:, -img_len:, :]

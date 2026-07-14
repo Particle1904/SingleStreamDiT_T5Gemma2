@@ -139,7 +139,7 @@ def train():
             if found_id:
                 wandb_run_id = found_id
                 print(f"Found WandB Run ID in checkpoint: {wandb_run_id}")
-    
+       
     accelerator.init_trackers(project_name=Config.project_name, 
                               config={k: v for k, v in Config.__dict__.items() if not k.startswith("__")},
                               init_kwargs={"wandb": {
@@ -254,9 +254,9 @@ def train():
 
     if sys.platform.startswith('linux') and Config.compile_model:
         try:
-            model = torch.compile(model, mode="max-autotune")
-            print("Successfully compiled model.")
-        except Exception as e: 
+            model = torch.compile(model, dynamic=True)
+            print("Successfully compiled model with dynamic shape tracing.")
+        except Exception as e:
             print(f"Compilation bypassed: {e}")
 
     model, optimizer, scheduler = accelerator.prepare(model, optimizer, scheduler)

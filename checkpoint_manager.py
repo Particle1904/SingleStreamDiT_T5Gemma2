@@ -14,9 +14,9 @@ class CheckpointManager:
     def __init__(self, config):
         self.config = config
         self.checkpoint_dir = config.checkpoint_dir
+        self.push_to_hub = getattr(config, 'push_to_hub', False)
         
         token = getattr(config, 'hf_token', None)
-        should_push = getattr(config, 'push_to_hub', False)
         try:
             self.api = HfApi(token=token) 
             print("DEBUG: HfApi initialized successfully.")
@@ -90,7 +90,7 @@ class CheckpointManager:
         torch.save(ema_state, ema_path)
         print(f"Saved EMA: {ema_filename}")
         
-        if self.api:
+        if self.api and self.push_to_hub:
             self._upload_to_hf(save_path, f"checkpoints/{state_filename}")
             self._upload_to_hf(ema_path, f"checkpoints/{ema_filename}")
             if not is_final:

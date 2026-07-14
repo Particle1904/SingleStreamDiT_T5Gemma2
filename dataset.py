@@ -85,31 +85,33 @@ class TextImageDataset(Dataset):
         }
         
 def dynamic_collate_fn(batch):
-    # 1. Fast path for fixed-size properties
     latents = torch.stack([item["latents"] for item in batch])
     repa_targets = torch.stack([item["repa_target"] for item in batch])
     heights = torch.tensor([item["height"] for item in batch])
     widths = torch.tensor([item["width"] for item in batch])
-    
-    # 2. Dynamic Text Padding (Pre-allocation method for maximum speed)
     texts = [item["text_embeds"] for item in batch]
     masks = [item["text_mask"] for item in batch]
     
-    # Find the maximum sequence length in THIS specific batch
-    max_len = max(t.shape[0] for t in texts)
+    max_batch_len = max(t.shape[0] for t in texts)
+    
+    alignment = 16
+    rounded_len = ((max_batch_len + alignment - 1) // alignment) * alignment
+    
+    target_len = min(rounded_len, Config.max_token_length)
+    if target_len == 0:
+        target_len = alignment
+        
     B = len(batch)
-    D = texts[0].shape[1] # Text embedding dimension
+    D = texts[0].shape[1]
     dtype = texts[0].dtype
     
-    # Pre-allocate contiguous blocks of memory (blazingly fast)
-    batched_texts = torch.zeros((B, max_len, D), dtype=dtype)
-    batched_masks = torch.zeros((B, max_len), dtype=torch.bool)
+    batched_texts = torch.zeros((B, target_len, D), dtype=dtype)
+    batched_masks = torch.zeros((B, target_len), dtype=torch.bool)
     
-    # Copy data into the pre-allocated tensors
     for i in range(B):
-        seq_len = texts[i].shape[0]
-        batched_texts[i, :seq_len, :] = texts[i]
-        batched_masks[i, :seq_len] = masks[i]
+        seq_len = min(texts[i].shape[0], target_len)
+        batched_texts[i, :seq_len, :] = texts[i][:seq_len]
+        batched_masks[i, :seq_len] = masks[i][:seq_len]
         
     return {
         "latents": latents,

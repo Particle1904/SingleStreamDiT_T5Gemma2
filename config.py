@@ -161,7 +161,9 @@ class Config:
     # Time parameterization and numerical integration
     # ============================================================
     # 3.0 for FLUX1 VAE, 4.63-6.93 for FLUX2 VAE
-    shift_val = 4.63   
+    # After a lot of tests, for 512x512 pixel a smaller value is 
+    # required for this codebase. Something around 2.0 to 3.0.
+    shift_val = 2.5  
                     
     # ============================================================
     # REGION: SYSTEM & DATALOADING
@@ -176,11 +178,11 @@ class Config:
     # REGION: LOGGING & VALIDATION
     # ============================================================
     run_validation_loss = False 
-    save_every = 100
+    save_every = 50
     validate_every = 25
     # Validation sampling parameters
-    validate_cfg = 5.0
-    validate_steps = 30 
+    validate_cfg = 1.5
+    validate_steps = 28 
     validate_sampler = "euler"
     validate_scheduler = "uniform"
     
