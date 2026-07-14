@@ -171,10 +171,13 @@ def dispatch_attention(q, k, v, attn_mask=None):
             attn_mask = attn_mask.unsqueeze(1).unsqueeze(2)
 
     if not getattr(dispatch_attention, "_announced_fallback", False):
-        print("[ATTENTION BACKEND] Using SDPA fallback path")
+        print("[ATTENTION BACKEND] Using SDPA EFFICIENT_ATTENTION fallback (manual GQA broadcast)")
         dispatch_attention._announced_fallback = True
-    with torch.nn.attention.sdpa_kernel([torch.nn.attention.SDPBackend.FLASH_ATTENTION,
-                                         torch.nn.attention.SDPBackend.EFFICIENT_ATTENTION,
+
+    # No FLASH_ATTENTION here on purpose
+    # and including it just adds a failed 
+    # dispatch check on every single call.
+    with torch.nn.attention.sdpa_kernel([torch.nn.attention.SDPBackend.EFFICIENT_ATTENTION,
                                          torch.nn.attention.SDPBackend.MATH]):
         out = F.scaled_dot_product_attention(q, k, v, attn_mask=attn_mask)
 
