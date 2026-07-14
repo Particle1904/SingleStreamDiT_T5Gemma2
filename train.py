@@ -252,13 +252,6 @@ def train():
             
             scheduler = get_cosine_schedule_with_warmup(optimizer, num_warmup_steps=new_warmup, num_training_steps=new_total_steps)
 
-    if sys.platform.startswith('linux') and Config.compile_model:
-        try:
-            model = torch.compile(model, dynamic=True)
-            print("Successfully compiled model with dynamic shape tracing.")
-        except Exception as e:
-            print(f"Compilation bypassed: {e}")
-
     model, optimizer, scheduler = accelerator.prepare(model, optimizer, scheduler)
     unwrapped_model = accelerator.unwrap_model(model)
     if not resumed:
@@ -266,6 +259,13 @@ def train():
             ema_model.module.load_state_dict(unwrapped_model.state_dict())
         else:
             ema_model.load_state_dict(unwrapped_model.state_dict())
+
+    if sys.platform.startswith('linux') and Config.compile_model:
+        try:
+            model = torch.compile(model, mode="default")
+            print("[COMPILE] torch.compile enabled (default)")
+        except Exception as e:
+            print(f"[COMPILE] Failed to enable, continuing eager: {e}")
 
     logger = CSVLogger(Config.log_file, resume=(Config.resume_from is not None))
 
@@ -328,7 +328,7 @@ def train():
                     optimizer.step()
                     scheduler.step()
                     optimizer.zero_grad()
-                    ema_updater.update(accelerator, model)
+                    ema_updater.update(accelerator, accelerator.unwrap_model(model, keep_torch_compile=False))
                                         
                     if global_step % LOG_EVERY_STEPS == 0:
                         lr_current = optimizer.param_groups[0]['lr']
