@@ -292,7 +292,7 @@ class SingleStreamDiT(nn.Module):
         self.hidden_size = hidden_size
         self.depth = depth
         self.num_heads = num_heads
-        self.n_kv_heads = self.num_heads // 2
+        self.num_kv_heads = self.num_heads // 4
         self.text_embed_dim = text_embed_dim
         self.refiner_depth = refiner_depth
         self.rope_theta = theta
@@ -300,7 +300,7 @@ class SingleStreamDiT(nn.Module):
         self.max_token_length = max_token_length
         self.repa_layer = repa_layer
         self.repa_dim = repa_dim
-
+        
         patch_sizes = [patch_size]
         self.x_embedders = nn.ModuleDict({
             str(ps): nn.Linear(self.in_channels * ps**2, self.hidden_size) for ps in patch_sizes
@@ -325,15 +325,15 @@ class SingleStreamDiT(nn.Module):
         self.rope = RopeEmbedder(theta=self.rope_theta, axes_dims=axes_dims)
 
         self.noise_refiner = nn.ModuleList([
-            TransformerBlock(self.hidden_size, self.num_heads, self.n_kv_heads, use_adaLN=True) 
+            TransformerBlock(self.hidden_size, self.num_heads, self.num_kv_heads, use_adaLN=True) 
             for _ in range(self.refiner_depth)
         ])
         self.context_refiner = nn.ModuleList([
-            TransformerBlock(self.hidden_size, self.num_heads, self.n_kv_heads, use_adaLN=False) 
+            TransformerBlock(self.hidden_size, self.num_heads, self.num_kv_heads, use_adaLN=False) 
             for _ in range(self.refiner_depth)
         ])
         self.blocks = nn.ModuleList([
-            TransformerBlock(self.hidden_size, self.num_heads, self.n_kv_heads, use_adaLN=True) 
+            TransformerBlock(self.hidden_size, self.num_heads, self.num_kv_heads, use_adaLN=True) 
             for _ in range(self.depth)
         ])
 
