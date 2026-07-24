@@ -252,7 +252,7 @@ def train():
             
             scheduler = get_cosine_schedule_with_warmup(optimizer, num_warmup_steps=new_warmup, num_training_steps=new_total_steps)
 
-    model, optimizer, scheduler = accelerator.prepare(model, optimizer, scheduler)
+    model, optimizer = accelerator.prepare(model, optimizer)
     unwrapped_model = accelerator.unwrap_model(model)
     if not resumed:
         if hasattr(ema_model, 'module'):
