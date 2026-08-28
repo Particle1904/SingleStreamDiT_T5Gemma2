@@ -43,6 +43,23 @@ class TimestepEmbedder(nn.Module):
         emb = torch.cat([torch.cos(args), torch.sin(args)], dim=-1)
         return self.mlp(emb.to(self.mlp[0].weight.dtype))
 
+class TextFusionStage(nn.Module):
+    def __init__(self, hidden_size):
+        super().__init__()
+        self.query = nn.Parameter(torch.randn(hidden_size) * 0.02)
+        self.k_proj = nn.Linear(hidden_size, hidden_size, bias=False)
+        self.v_proj = nn.Linear(hidden_size, hidden_size, bias=False)
+        self.out_proj = nn.Linear(hidden_size, hidden_size, bias=False)
+        self.scale = hidden_size ** -0.5
+
+    def forward(self, layer_stack):
+        k = self.k_proj(layer_stack)
+        v = self.v_proj(layer_stack)
+        scores = (k * self.query).sum(-1) * self.scale
+        weights = scores.softmax(dim=1).unsqueeze(-1)
+        fused = (weights * v).sum(dim=1)
+        return self.out_proj(fused)
+
 class SwiGLUWithImageConv(nn.Module):
     def __init__(self, dim: int, hidden_dim: int, multiple_of: int = 256):
         super().__init__()
@@ -282,8 +299,8 @@ class SingleStreamDiT(nn.Module):
         theta: float = Config.rope_base,
         cond_dropout_prob: float = Config.text_dropout,
         max_token_length: int = Config.max_token_length,
-        repa_layer: int = Config.repa_layer,
-        repa_dim: int = Config.repa_dim
+        repa_dim: int = None,
+        repa_layer: int = None
     ):
         super().__init__()
 
@@ -298,8 +315,8 @@ class SingleStreamDiT(nn.Module):
         self.rope_theta = theta
         self.cond_dropout_prob = cond_dropout_prob
         self.max_token_length = max_token_length
-        self.repa_layer = repa_layer
-        self.repa_dim = repa_dim
+        self.repa_dim = repa_dim if repa_dim is not None else Config.repa_dim
+        self.repa_layer = repa_layer if repa_layer is not None else round(depth * Config.repa_layer_frac)
         
         patch_sizes = [patch_size]
         self.x_embedders = nn.ModuleDict({
@@ -309,9 +326,12 @@ class SingleStreamDiT(nn.Module):
             str(ps): nn.Linear(self.hidden_size, self.in_channels * ps**2) for ps in patch_sizes
         })
 
+        self.text_fusion = TextFusionStage(self.text_embed_dim)
         self.cap_embedder = nn.Sequential(
-            RMSNorm(self.text_embed_dim), 
-            nn.Linear(self.text_embed_dim, self.hidden_size)
+            RMSNorm(self.text_embed_dim),
+            nn.Linear(self.text_embed_dim, self.hidden_size),
+            nn.SiLU(),
+            nn.Linear(self.hidden_size, self.hidden_size)
         )
         self.t_embedder = TimestepEmbedder(self.hidden_size)
         self.t_adaLN_proj = nn.Sequential(
@@ -427,13 +447,15 @@ class SingleStreamDiT(nn.Module):
 
         # CFG Dropouts
         if self.training and self.cond_dropout_prob > 0.0:
-            dropout_mask = torch.rand(B, 1, 1, device=x.device) > self.cond_dropout_prob
+            dropout_mask = torch.rand(B, 1, 1, 1, device=x.device) > self.cond_dropout_prob
             text_embeds = text_embeds * dropout_mask
+
+        is_null = (text_embeds.abs().sum(dim=(1, 2, 3)) == 0).view(B, 1, 1)
+        text_embeds = self.text_fusion(text_embeds)
 
         context = self.cap_embedder(text_embeds)
         seq_len_text = context.shape[1]
 
-        is_null = (text_embeds.abs().sum(dim=(1, 2)) == 0).view(B, 1, 1)
         context = torch.where(is_null, self.cap_pad_token.expand_as(context), context)
 
         t_emb = self.t_embedder(t)

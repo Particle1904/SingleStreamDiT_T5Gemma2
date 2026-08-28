@@ -27,8 +27,8 @@ ENABLE_RK4 = False
 # Set these to specific filenames in your cache directory to test 
 # Set to None to let the script automatically grab the first two files.
 # =====================================================================
-MANUAL_FILE_A = "1706108.pt" #"1349.pt"
-MANUAL_FILE_B = "4454758.pt" #"34953.pt"
+MANUAL_FILE_A = "39.pt"
+MANUAL_FILE_B = "176.pt"
 # =====================================================================
 
 torch.backends.cuda.enable_flash_sdp(True)

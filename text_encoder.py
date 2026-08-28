@@ -1,5 +1,6 @@
 import torch
 import torch.nn as nn
+import numpy as np
 from transformers import AutoTokenizer, AutoConfig, AutoModel, AutoModelForSeq2SeqLM
 from config import Config
 
@@ -14,6 +15,7 @@ class TextEncoderWrapper(nn.Module):
         self.tokenizer = AutoTokenizer.from_pretrained(self.model_id, trust_remote_code=True)
         
         self.config = AutoConfig.from_pretrained(self.model_id, trust_remote_code=True)
+        self.tap_indices = [int(i) for i in np.linspace(0, self.config.num_hidden_layers, Config.text_num_tapped_layers, dtype=int)]
         self.is_causal = True
         
         if getattr(self.config, "is_encoder_decoder", False) or "t5" in self.model_id.lower() or "t5gemma" in self.model_id.lower():
@@ -71,7 +73,7 @@ class TextEncoderWrapper(nn.Module):
         else:
             # Causal Decoder (Qwen3): Extract representations across trailing layers
             outputs = self.text_model(**inputs, output_hidden_states=True)
-            hidden = torch.stack(outputs.hidden_states[-4:]).mean(dim=0)
+            hidden = torch.stack([outputs.hidden_states[i] for i in self.tap_indices], dim=1)
         
         embeds = hidden
         

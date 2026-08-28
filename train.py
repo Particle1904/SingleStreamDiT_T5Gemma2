@@ -162,10 +162,11 @@ def train():
         num_heads=Config.num_heads,
         text_embed_dim=Config.text_embed_dim,
         refiner_depth=Config.refiner_depth,
+        repa_dim=Config.repa_dim,
+        repa_layer=None
     ).to(Config.device, model_dtype)
     
     vae = load_vae()
-    
     model.initialize_weights()
     print_model_parameters(model)
     

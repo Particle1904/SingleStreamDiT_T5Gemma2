@@ -2,6 +2,7 @@ import os
 import torch
 import argparse
 import sys
+from transformers import AutoConfig
 
 class Config:
     # ============================================================
@@ -34,7 +35,7 @@ class Config:
     log_file = os.path.join(log_dir, f"{project_name}_log.csv")    
     
     # Used by sanity_check / cache inspection utilities
-    target_filename = "1726.pt"
+    target_filename = "39.pt"
     target_file = os.path.join(cache_dir, target_filename)        
     # Resume training from a full checkpoint (model + optimizer + EMA)
     # Set to None for a fresh run or "latest" for HF model
@@ -52,6 +53,7 @@ class Config:
     # 2560 -> T5Gemma2-4B-4B
     
     text_embed_dim = 2048
+    text_num_tapped_layers = 6
 
     # DiT backbone
     hidden_size = 768
@@ -110,10 +112,10 @@ class Config:
     # 1e-4 or 2e-4 for fresh/aggressive and 4e-5 or 5e-5 for fine-tuning
     learning_rate = 1e-4
     # Total number of epochs (from scratch or resumed)
-    epochs = 1400
+    epochs = 300 #1400
     # Effective batch size per optimizer step
-    batch_size = 32
-    accum_steps = 2
+    batch_size = 6 #32
+    accum_steps = 1 #2
     # Loss for velocity prediction
     # Options: "mse", "l1", "huber".
     loss_type = "mse"
@@ -123,7 +125,7 @@ class Config:
     weight_decay = 0.05
     optimizer_warmup = 0.05
     # Drop text conditioning during training (CFG support)    
-    text_dropout = 0.15
+    text_dropout = 0.20
     # Random horizontal flip in latent space
     flip_aug = False 
     
@@ -139,19 +141,19 @@ class Config:
     # 1024 -> ViT-L
     # 1280 -> ViT-H
     # 4096 -> ViT-7B
-    repa_dim = 768
-    repa_layer = 8
+    repa_dim = AutoConfig.from_pretrained(repa_model).hidden_size
+    repa_layer_frac = 0.35
     # Paper uses 0.5
     repa_lambda = 0.5
     # Stop REPA after repa_cutoff % of total training epochs
-    repa_cutoff = 0.30 
+    repa_cutoff = 0.3
     
     # ============================================================
     # REGION: OPTIMIZATION & PRECISION
     # Runtime and numerical behavior
     # ============================================================
     dtype = torch.bfloat16
-    gradient_checkpointing = True
+    gradient_checkpointing = False #True
     # Exponential Moving Average for inference stability
     use_ema = True
     ema_decay = 0.999
@@ -161,9 +163,7 @@ class Config:
     # Time parameterization and numerical integration
     # ============================================================
     # 3.0 for FLUX1 VAE, 4.63-6.93 for FLUX2 VAE
-    # After a lot of tests, for 512x512 pixel a smaller value is 
-    # required for this codebase. Something around 2.0 to 3.0.
-    shift_val = 2.5  
+    shift_val = 2.5 #4.63   
                     
     # ============================================================
     # REGION: SYSTEM & DATALOADING
@@ -171,15 +171,15 @@ class Config:
     accelerator = None
     device = "cuda" if torch.cuda.is_available() else "cpu"
     # Cache entire dataset in RAM (recommended for <= ~20k images)
-    load_entire_dataset = False
+    load_entire_dataset = True #False
     num_workers = 2 if os.name != 'nt' else 0
     
     # ============================================================
     # REGION: LOGGING & VALIDATION
     # ============================================================
     run_validation_loss = False 
-    save_every = 50
-    validate_every = 25
+    save_every = 10
+    validate_every = 10 #25
     # Validation sampling parameters
     validate_cfg = 1.5
     validate_steps = 28 

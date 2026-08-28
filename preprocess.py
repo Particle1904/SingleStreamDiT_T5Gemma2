@@ -66,7 +66,7 @@ def setup_models():
     print(f"Loading DINOv3: {Config.repa_model}...")
     dinov3 = AutoModel.from_pretrained(Config.repa_model).to(Config.device, dtype=Config.dtype).eval()
     
-    return vae, text_encoder, dinov3
+    return vae, text_encoder, dinov3, dinov3.config.patch_size
 
 def process():
     os.makedirs(Config.cache_dir, exist_ok=True)
@@ -111,7 +111,7 @@ def process():
         print("All files are already processed! No work to do. Exiting safely.")
         return
 
-    vae, text_encoder, dinov3 = setup_models()
+    vae, text_encoder, dinov3, dino_patch_size = setup_models()
     
     imagenet_mean = torch.tensor([0.485, 0.456, 0.406], device=Config.device, dtype=Config.dtype).view(1, 3, 1, 1)
     imagenet_std = torch.tensor([0.229, 0.224, 0.225], device=Config.device, dtype=Config.dtype).view(1, 3, 1, 1)
@@ -200,7 +200,7 @@ def process():
             # 2. Process through DINOv3
             with torch.no_grad(), torch.autocast(device_type=device_type, dtype=Config.dtype):
                 dino_out = dinov3(dinov3_input)
-                num_patches = (bh // 16) * (bw // 16)
+                num_patches = (bh // dino_patch_size) * (bw // dino_patch_size)
                 repa_targets = dino_out.last_hidden_state[:, -num_patches:, :]
 
             # 3. Save, with INT8 quantization applied to the targets on the fly
@@ -223,7 +223,7 @@ def process():
                     "latents": latents_batch[idx].cpu().to(dtype=Config.dtype),
                     "repa_target": quantized_tensor,
                     "repa_scale": scale_factor.to(torch.float32),
-                    "text_embeds_list": data["embeds"][:, :max_len].clone(),
+                    "text_embeds_list": data["embeds"][:, :, :max_len].clone(),
                     "attention_mask_list": data["mask"][:, :max_len].clone(),
                     "width": bw,
                     "height": bh

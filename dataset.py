@@ -65,10 +65,10 @@ class TextImageDataset(Dataset):
         else:
             text = data["text_embeds"]
             mask = data.get("attention_mask", torch.ones(text.shape[0], dtype=torch.bool))
-
+            
         target_len = Config.max_token_length
-        if text.shape[0] > target_len:
-            text = text[:target_len]
+        if text.shape[1] > target_len:
+            text = text[:, :target_len, :]
             mask = mask[:target_len]
 
         latents = normalize_latents(latents)
@@ -91,28 +91,22 @@ def dynamic_collate_fn(batch):
     widths = torch.tensor([item["width"] for item in batch])
     texts = [item["text_embeds"] for item in batch]
     masks = [item["text_mask"] for item in batch]
-    
-    max_batch_len = max(t.shape[0] for t in texts)
-    
+    max_batch_len = max(t.shape[1] for t in texts)
     alignment = 16
     rounded_len = ((max_batch_len + alignment - 1) // alignment) * alignment
-    
     target_len = min(rounded_len, Config.max_token_length)
     if target_len == 0:
         target_len = alignment
-        
     B = len(batch)
-    D = texts[0].shape[1]
+    N_layers = texts[0].shape[0]
+    D = texts[0].shape[2]
     dtype = texts[0].dtype
-    
-    batched_texts = torch.zeros((B, target_len, D), dtype=dtype)
+    batched_texts = torch.zeros((B, N_layers, target_len, D), dtype=dtype)
     batched_masks = torch.zeros((B, target_len), dtype=torch.bool)
-    
     for i in range(B):
-        seq_len = min(texts[i].shape[0], target_len)
-        batched_texts[i, :seq_len, :] = texts[i][:seq_len]
+        seq_len = min(texts[i].shape[1], target_len)
+        batched_texts[i, :, :seq_len, :] = texts[i][:, :seq_len, :]
         batched_masks[i, :seq_len] = masks[i][:seq_len]
-        
     return {
         "latents": latents,
         "repa_target": repa_targets,
